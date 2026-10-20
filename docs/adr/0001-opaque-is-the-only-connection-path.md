@@ -1,0 +1,3 @@
+# The connection layer has one path: opaque
+
+Every global request, channel request and channel open crosses the connection layer as an Opaque Request or Opaque Channel Open, in both directions. Typed APIs (pty-req, exec, exit-status, …) are optional codecs that build and read those opaque values, never a second receive path, and the core never rejects a request because it does not recognise it. We chose this over russh's shape (typed parsing, unknown requests refused, unknown pty modes dropped) because the first consumer, acwbroker, must Pass-through what it receives without losing anything, and still be able to refuse a specific request and close that one channel itself.
