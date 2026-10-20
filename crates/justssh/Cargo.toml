@@ -1,0 +1,33 @@
+[package]
+name = "justssh"
+description = "Sans-IO SSH client and server: transport, authentication and connection state machines"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+justssh-wire.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+aes.workspace = true
+ctr.workspace = true
+aes-gcm.workspace = true
+chacha20.workspace = true
+poly1305.workspace = true
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+p256.workspace = true
+p384.workspace = true
+p521.workspace = true
+ml-kem.workspace = true
+crypto-bigint.workspace = true
+rsa.workspace = true
+rand_core.workspace = true
+getrandom.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

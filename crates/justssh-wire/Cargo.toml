@@ -1,0 +1,12 @@
+[package]
+name = "justssh-wire"
+description = "SSH message encoding and decoding, with no dependencies"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

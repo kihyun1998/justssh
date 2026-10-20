@@ -1,0 +1,44 @@
+# justssh workspace: wire / core / tokio adapter (ADR-0003).
+[workspace]
+resolver = "2"
+members = ["crates/justssh-wire", "crates/justssh", "crates/justssh-tokio"]
+exclude = ["ci/coexist"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kihyun1998/justssh"
+
+[workspace.dependencies]
+justssh-wire = { path = "crates/justssh-wire" }
+justssh = { path = "crates/justssh" }
+
+tokio = { version = "1", default-features = false }
+
+# Crypto: latest stable RustCrypto releases only, rsa on 0.9 (ADR-0004).
+sha1 = "0.11"
+sha2 = "0.11"
+hmac = "0.13"
+aes = "0.9"
+ctr = "0.10"
+aes-gcm = "0.11"
+chacha20 = "0.10"
+poly1305 = "0.9"
+ed25519-dalek = "3"
+x25519-dalek = "3"
+p256 = { version = "0.14", features = ["ecdh", "ecdsa"] }
+p384 = { version = "0.14", features = ["ecdh", "ecdsa"] }
+p521 = { version = "0.14", features = ["ecdh", "ecdsa"] }
+ml-kem = "0.3"
+crypto-bigint = "0.7"
+rsa = "0.9"
+rand_core = "0.10"
+getrandom = "0.4"
+subtle = "2"
+zeroize = { version = "1", features = ["derive"] }
+
+# Public enums and structs are #[non_exhaustive]; configuration is built, not written as a literal.
+[workspace.lints.clippy]
+exhaustive_enums = "deny"
+exhaustive_structs = "deny"
