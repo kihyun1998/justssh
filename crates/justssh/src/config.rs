@@ -1,0 +1,150 @@
+//! Server and client configuration.
+
+use core::fmt;
+
+use ed25519_dalek::Signer;
+use justssh_wire::Writer;
+use rand_core::{CryptoRng, UnwrapErr};
+use zeroize::Zeroizing;
+
+pub(crate) type BoxRng = Box<dyn CryptoRng + Send>;
+
+fn system_rng() -> BoxRng {
+    Box::new(UnwrapErr(getrandom::SysRng))
+}
+
+/// A server host key.
+#[derive(Clone)]
+pub struct HostKey {
+    key: ed25519_dalek::SigningKey,
+}
+
+impl HostKey {
+    /// An `ssh-ed25519` host key from its 32-byte secret seed.
+    pub fn ed25519_from_seed(seed: Zeroizing<[u8; 32]>) -> Self {
+        HostKey {
+            key: ed25519_dalek::SigningKey::from_bytes(&seed),
+        }
+    }
+
+    pub(crate) fn algorithm(&self) -> &'static str {
+        "ssh-ed25519"
+    }
+
+    /// The public key blob `K_S` (RFC 8709 §4).
+    pub(crate) fn public_blob(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.string(self.algorithm().as_bytes())
+            .string(&self.key.verifying_key().to_bytes());
+        w.into_bytes()
+    }
+
+    /// The signature blob over `data` (RFC 8709 §6).
+    pub(crate) fn sign(&self, data: &[u8]) -> Vec<u8> {
+        let sig = self.key.sign(data);
+        let mut w = Writer::new();
+        w.string(self.algorithm().as_bytes())
+            .string(&sig.to_bytes());
+        w.into_bytes()
+    }
+}
+
+impl fmt::Debug for HostKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostKey")
+            .field("algorithm", &self.algorithm())
+            .finish_non_exhaustive()
+    }
+}
+
+/// How a [`Server`](crate::Server) runs.
+pub struct ServerConfig {
+    pub(crate) host_key: HostKey,
+    pub(crate) rng: BoxRng,
+    pub(crate) version: String,
+}
+
+impl ServerConfig {
+    /// A builder for a server presenting `host_key`.
+    pub fn builder(host_key: HostKey) -> ServerConfigBuilder {
+        ServerConfigBuilder {
+            host_key,
+            rng: None,
+            version: None,
+        }
+    }
+}
+
+/// Builds a [`ServerConfig`].
+pub struct ServerConfigBuilder {
+    host_key: HostKey,
+    rng: Option<BoxRng>,
+    version: Option<String>,
+}
+
+impl ServerConfigBuilder {
+    /// The software version in the identification line: `SSH-2.0-<version>`. Defaults to
+    /// `justssh`.
+    ///
+    /// # Panics
+    /// If `version` is empty, longer than 245 bytes, or holds anything but printable US-ASCII
+    /// other than space and `-` (RFC 4253 §4.2).
+    pub fn software_version(mut self, version: &str) -> Self {
+        assert!(
+            !version.is_empty()
+                && version.len() <= 245
+                && version.bytes().all(|b| b.is_ascii_graphic() && b != b'-'),
+            "invalid SSH software version {version:?}"
+        );
+        self.version = Some(version.to_owned());
+        self
+    }
+
+    /// The random number generator for cookies, padding and ephemeral keys. Defaults to the
+    /// operating system's generator.
+    pub fn rng(mut self, rng: impl CryptoRng + Send + 'static) -> Self {
+        self.rng = Some(Box::new(rng));
+        self
+    }
+
+    pub fn build(self) -> ServerConfig {
+        ServerConfig {
+            host_key: self.host_key,
+            rng: self.rng.unwrap_or_else(system_rng),
+            version: format!("SSH-2.0-{}", self.version.as_deref().unwrap_or("justssh")),
+        }
+    }
+}
+
+/// How a [`Client`](crate::Client) runs.
+pub struct ClientConfig {
+    pub(crate) rng: BoxRng,
+    pub(crate) version: String,
+}
+
+impl ClientConfig {
+    pub fn builder() -> ClientConfigBuilder {
+        ClientConfigBuilder { rng: None }
+    }
+}
+
+/// Builds a [`ClientConfig`].
+pub struct ClientConfigBuilder {
+    rng: Option<BoxRng>,
+}
+
+impl ClientConfigBuilder {
+    /// The random number generator for cookies, padding and ephemeral keys. Defaults to the
+    /// operating system's generator.
+    pub fn rng(mut self, rng: impl CryptoRng + Send + 'static) -> Self {
+        self.rng = Some(Box::new(rng));
+        self
+    }
+
+    pub fn build(self) -> ClientConfig {
+        ClientConfig {
+            rng: self.rng.unwrap_or_else(system_rng),
+            version: "SSH-2.0-justssh".to_owned(),
+        }
+    }
+}

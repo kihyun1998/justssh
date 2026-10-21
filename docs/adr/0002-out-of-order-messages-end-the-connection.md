@@ -11,3 +11,7 @@ When strict-kex is negotiated, `IGNORE`, `DEBUG` and `UNIMPLEMENTED` during the 
 Which messages each state allows is decided in one table, and that table is a fuzzing target. Most ordering vulnerabilities come from that decision being scattered across the code.
 
 This differs from x/crypto/ssh in one place. Go never sends `UNIMPLEMENTED` and closes the connection instead. We follow the RFC here, because the RFC is binding and Go is binding only for behaviour acwbroker can observe.
+
+## Addendum (2026-10-21): the peer is told why
+
+Before closing because of an error, this side sends `SSH_MSG_DISCONNECT` with a reason code (RFC 4253 §11.1) and a description, once its identification line has been sent. x/crypto/ssh closes the socket without one. This is a difference the client can observe ("Received disconnect … 14: no authentication methods available" instead of "Connection closed"); the maintainer chose it for diagnosability (#3).

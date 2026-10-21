@@ -15,6 +15,7 @@ justssh-wire = { path = "crates/justssh-wire" }
 justssh = { path = "crates/justssh" }
 
 tokio = { version = "1", default-features = false }
+proptest = "1"
 
 # Crypto: latest stable RustCrypto releases only, rsa on 0.9 (ADR-0004).
 sha1 = "0.11"
