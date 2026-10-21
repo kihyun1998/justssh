@@ -54,6 +54,11 @@ pub enum Action {
         methods: Vec<String>,
         partial_success: bool,
     },
+    /// The server refused the key of the last `publickey` attempt without a signature being
+    /// sent: it answered the query with `SSH_MSG_USERAUTH_FAILURE`, or its
+    /// `SSH_MSG_USERAUTH_PK_OK` named another key or an algorithm outside the key's family.
+    /// `methods` are those the server last named.
+    PublicKeyRefused { methods: Vec<String> },
     /// The server asks the keyboard-interactive questions in it; answer with
     /// [`Client::answer_prompts`](crate::Client::answer_prompts).
     KeyboardInteractive(InfoRequest),

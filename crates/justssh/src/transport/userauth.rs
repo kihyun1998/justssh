@@ -1,10 +1,11 @@
 //! User authentication (RFC 4252, RFC 4256): the server's attempt counting, the way
 //! x/crypto/ssh counts it, and the client's requests.
 
-use justssh_wire::{DecodeError, Reader, number};
+use justssh_wire::{DecodeError, Reader, Writer, number};
 use zeroize::Zeroizing;
 
 use crate::event::{InfoRequest, Prompt};
+use crate::key::PrivateKey;
 
 /// Authentication attempts of any outcome after which the server disconnects.
 pub(crate) const MAX_ATTEMPTS: u32 = 128;
@@ -106,6 +107,7 @@ pub(crate) enum Method {
     None,
     Password,
     KeyboardInteractive,
+    PublicKey,
 }
 
 impl Method {
@@ -114,8 +116,19 @@ impl Method {
             Method::None => "none",
             Method::Password => "password",
             Method::KeyboardInteractive => "keyboard-interactive",
+            Method::PublicKey => PUBLICKEY,
         }
     }
+}
+
+const PUBLICKEY: &str = "publickey";
+
+/// A `publickey` attempt: the key, the algorithm it is offered under, and whether the signed
+/// request has gone.
+pub(crate) struct KeyAttempt {
+    pub(crate) key: PrivateKey,
+    pub(crate) algorithm: &'static str,
+    pub(crate) signed: bool,
 }
 
 /// The client's authentication state.
@@ -129,6 +142,8 @@ pub(crate) struct ClientAuth {
     pub(crate) ext_info: bool,
     /// The methods the last `SSH_MSG_USERAUTH_FAILURE` named.
     pub(crate) methods: Vec<String>,
+    /// The outstanding `publickey` attempt.
+    pub(crate) key: Option<KeyAttempt>,
 }
 
 impl ClientAuth {
@@ -139,6 +154,7 @@ impl ClientAuth {
             questions: None,
             ext_info: false,
             methods: Vec::new(),
+            key: None,
         }
     }
 }
@@ -176,7 +192,7 @@ impl SecretPayload {
 /// An `SSH_MSG_USERAUTH_REQUEST` for `method`; `password` is sent with [`Method::Password`].
 pub(crate) fn client_request(user: &[u8], method: Method, password: &[u8]) -> Zeroizing<Vec<u8>> {
     let data = match method {
-        Method::None => 0,
+        Method::None | Method::PublicKey => 0,
         Method::Password => 1 + 4 + password.len(),
         Method::KeyboardInteractive => 8,
     };
@@ -187,7 +203,7 @@ pub(crate) fn client_request(user: &[u8], method: Method, password: &[u8]) -> Ze
         .string(CONNECTION.as_bytes())
         .string(method.name().as_bytes());
     match method {
-        Method::None => {}
+        Method::None | Method::PublicKey => {}
         Method::Password => {
             p.u8(0).string(password);
         }
@@ -229,4 +245,55 @@ pub(crate) fn info_request(payload: &[u8]) -> Result<InfoRequest, DecodeError> {
         instruction,
         prompts,
     })
+}
+
+/// A `publickey` request (RFC 4252 §7) for `algorithm` and public key `blob`: a query without
+/// `signature`, the signed request with it.
+pub(crate) fn publickey_request(
+    user: &[u8],
+    algorithm: &str,
+    blob: &[u8],
+    signature: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u8(number::USERAUTH_REQUEST)
+        .string(user)
+        .string(CONNECTION.as_bytes())
+        .string(PUBLICKEY.as_bytes())
+        .bool(signature.is_some())
+        .string(algorithm.as_bytes())
+        .string(blob);
+    if let Some(signature) = signature {
+        w.string(signature);
+    }
+    w.into_bytes()
+}
+
+/// What a `publickey` signature covers: the session identifier and the signed request's fields.
+pub(crate) fn publickey_signed_data(
+    session_id: &[u8],
+    user: &[u8],
+    algorithm: &str,
+    blob: &[u8],
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.string(session_id)
+        .u8(number::USERAUTH_REQUEST)
+        .string(user)
+        .string(CONNECTION.as_bytes())
+        .string(PUBLICKEY.as_bytes())
+        .bool(true)
+        .string(algorithm.as_bytes())
+        .string(blob);
+    w.into_bytes()
+}
+
+/// The algorithm and public key blob of an `SSH_MSG_USERAUTH_PK_OK` in `payload`, message
+/// number included.
+pub(crate) fn pk_ok(payload: &[u8]) -> Result<(&str, &[u8]), DecodeError> {
+    let mut r = Reader::new(payload.get(1..).ok_or(DecodeError::Empty)?);
+    let algorithm = r.utf8()?;
+    let blob = r.string()?;
+    r.finish()?;
+    Ok((algorithm, blob))
 }

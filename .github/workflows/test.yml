@@ -35,21 +35,32 @@ jobs:
           echo 'justssh:justssh-ci-only' | sudo chpasswd
           sudo mkdir -p /run/sshd
           sudo ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/justssh_host_ed25519
+          mkdir -p /tmp/justssh-keys
           common='ListenAddress 127.0.0.1
           HostKey /etc/ssh/justssh_host_ed25519
-          PubkeyAuthentication no
           AllowUsers justssh'
-          printf '%s\nPort 2201\nPidFile /run/sshd-password.pid\nUsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\nClientAliveInterval 1\nClientAliveCountMax 2\n' "$common" | sudo tee /etc/ssh/justssh-password.conf
-          printf '%s\nPort 2202\nPidFile /run/sshd-pam.pid\nUsePAM yes\nPasswordAuthentication no\nKbdInteractiveAuthentication yes\n' "$common" | sudo tee /etc/ssh/justssh-pam.conf
-          sudo /usr/sbin/sshd -t -f /etc/ssh/justssh-password.conf
-          sudo /usr/sbin/sshd -t -f /etc/ssh/justssh-pam.conf
-          sudo /usr/sbin/sshd -f /etc/ssh/justssh-password.conf
-          sudo /usr/sbin/sshd -f /etc/ssh/justssh-pam.conf
+          keys='PubkeyAuthentication yes
+          AuthorizedKeysFile /tmp/justssh-keys/authorized_keys
+          TrustedUserCAKeys /tmp/justssh-keys/ca.pub
+          StrictModes no
+          UsePAM no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no'
+          printf '%s\nPort 2201\nPidFile /run/sshd-password.pid\nPubkeyAuthentication no\nUsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\nClientAliveInterval 1\nClientAliveCountMax 2\n' "$common" | sudo tee /etc/ssh/justssh-password.conf
+          printf '%s\nPort 2202\nPidFile /run/sshd-pam.pid\nPubkeyAuthentication no\nUsePAM yes\nPasswordAuthentication no\nKbdInteractiveAuthentication yes\n' "$common" | sudo tee /etc/ssh/justssh-pam.conf
+          printf '%s\n%s\nPort 2204\nPidFile /run/sshd-keys.pid\n' "$common" "$keys" | sudo tee /etc/ssh/justssh-keys.conf
+          printf '%s\n%s\nPort 2205\nPidFile /run/sshd-keys-ssh-rsa.pid\nPubkeyAcceptedAlgorithms ssh-rsa,ssh-rsa-cert-v01@openssh.com\n' "$common" "$keys" | sudo tee /etc/ssh/justssh-keys-ssh-rsa.conf
+          for c in password pam keys keys-ssh-rsa; do
+            sudo /usr/sbin/sshd -t -f /etc/ssh/justssh-$c.conf
+          done
+          for c in password pam keys keys-ssh-rsa; do
+            sudo /usr/sbin/sshd -f /etc/ssh/justssh-$c.conf
+          done
 
       - name: Start OpenSSH 8.7p1 (Rocky Linux 9, as RHEL 9) for the client tests
         run: |
-          docker run -d --name rhel9-sshd -p 127.0.0.1:2203:22 docker.io/rockylinux/rockylinux:9.5@sha256:149fd31d916038eb1084d0e051537e279d7afcd5de0b365254e8fa3c3ef12bad bash -c \
-            "dnf install -yq --disablerepo='*' --repofrompath=vault,https://dl.rockylinux.org/vault/rocky/9.5/BaseOS/x86_64/os/ --setopt=vault.gpgcheck=1 --setopt=vault.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-9 openssh-server && useradd -m justssh && echo 'justssh:justssh-ci-only' | chpasswd && ssh-keygen -A && exec /usr/sbin/sshd -D -e"
+          docker run -d --name rhel9-sshd -p 127.0.0.1:2203:22 -v /tmp/justssh-keys:/tmp/justssh-keys:ro docker.io/rockylinux/rockylinux:9.5@sha256:149fd31d916038eb1084d0e051537e279d7afcd5de0b365254e8fa3c3ef12bad bash -c \
+            "dnf install -yq --disablerepo='*' --repofrompath=vault,https://dl.rockylinux.org/vault/rocky/9.5/BaseOS/x86_64/os/ --setopt=vault.gpgcheck=1 --setopt=vault.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-9 openssh-server && useradd -m justssh && echo 'justssh:justssh-ci-only' | chpasswd && ssh-keygen -A && exec /usr/sbin/sshd -D -e -o StrictModes=no -o AuthorizedKeysFile=/tmp/justssh-keys/authorized_keys -o TrustedUserCAKeys=/tmp/justssh-keys/ca.pub"
           for _ in $(seq 300); do
             docker logs rhel9-sshd 2>&1 | grep -q 'Server listening' && exit 0
             sleep 1
@@ -63,6 +74,9 @@ jobs:
           JUSTSSH_SSHD_PASSWORD_ADDR: 127.0.0.1:2201
           JUSTSSH_SSHD_PAM_ADDR: 127.0.0.1:2202
           JUSTSSH_SSHD_RHEL9_ADDR: 127.0.0.1:2203
+          JUSTSSH_SSHD_KEYS_ADDR: 127.0.0.1:2204
+          JUSTSSH_SSHD_SSH_RSA_ADDR: 127.0.0.1:2205
+          JUSTSSH_SSHD_KEYS_DIR: /tmp/justssh-keys
           JUSTSSH_SSHD_USER: justssh
           JUSTSSH_SSHD_SECRET: justssh-ci-only
         run: cargo test --workspace

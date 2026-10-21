@@ -3,6 +3,7 @@
 use crate::config::ClientConfig;
 use crate::event::{Action, DisconnectReason, Event, Phase};
 use crate::handshake::Handshake;
+use crate::key::PrivateKey;
 use crate::transport::{Method, Role, Transport};
 use zeroize::Zeroizing;
 
@@ -71,8 +72,7 @@ impl Client {
     /// `server-sig-algs` extension (RFC 8308 §3.1) of its first `SSH_MSG_EXT_INFO`, if it sent
     /// one.
     pub fn server_sig_algs(&self) -> Option<Vec<&str>> {
-        let value = core::str::from_utf8(self.transport.ext_info("server-sig-algs")?).ok()?;
-        Some(value.split(',').filter(|n| !n.is_empty()).collect())
+        self.transport.server_sig_algs()
     }
 
     /// Sends an authentication request for method `none`, which reports the methods the server
@@ -99,6 +99,21 @@ impl Client {
     /// order. A different number of answers, or answers nobody asked for, end the connection.
     pub fn answer_prompts(&mut self, answers: Vec<Zeroizing<Vec<u8>>>) -> Vec<Action> {
         self.transport.answer_prompts(&answers)
+    }
+
+    /// Sends a `publickey` query for `key` under the algorithm the server's `server-sig-algs`
+    /// leads to, as x/crypto/ssh picks it; once the server accepts the key with
+    /// `SSH_MSG_USERAUTH_PK_OK`, the signed request follows. The answer is
+    /// [`Action::AuthFailure`] or the phase becoming [`Phase::Connected`], as for the other
+    /// methods.
+    pub fn auth_publickey(&mut self, key: &PrivateKey) -> Vec<Action> {
+        self.transport.client_publickey(key, None)
+    }
+
+    /// [`auth_publickey`](Self::auth_publickey) under `algorithm`, which must be one the key
+    /// signs under; another ends the connection.
+    pub fn auth_publickey_as(&mut self, key: &PrivateKey, algorithm: &str) -> Vec<Action> {
+        self.transport.client_publickey(key, Some(algorithm))
     }
 
     crate::endpoint::connection_methods!();

@@ -61,6 +61,7 @@ impl fmt::Debug for HostKey {
 /// How a [`Server`](crate::Server) runs.
 pub struct ServerConfig {
     pub(crate) host_key: HostKey,
+    pub(crate) send_ext_info: bool,
     pub(crate) rng: BoxRng,
     pub(crate) version: String,
     pub(crate) max_auth_tries: u32,
@@ -81,6 +82,7 @@ impl ServerConfig {
     pub fn builder(host_key: HostKey) -> ServerConfigBuilder {
         ServerConfigBuilder {
             host_key,
+            send_ext_info: true,
             rng: None,
             version: None,
             max_auth_tries: 6,
@@ -93,6 +95,7 @@ impl ServerConfig {
 /// Builds a [`ServerConfig`].
 pub struct ServerConfigBuilder {
     host_key: HostKey,
+    send_ext_info: bool,
     rng: Option<BoxRng>,
     version: Option<String>,
     max_auth_tries: u32,
@@ -132,6 +135,13 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Whether to answer a client's `ext-info-c` with `SSH_MSG_EXT_INFO`. For tests only.
+    #[cfg(feature = "test-support")]
+    pub fn send_ext_info(mut self, send: bool) -> Self {
+        self.send_ext_info = send;
+        self
+    }
+
     /// No limit on failed authentication attempts; the cap of 128 attempts of any outcome
     /// still applies.
     pub fn unlimited_auth_tries(mut self) -> Self {
@@ -166,6 +176,7 @@ impl ServerConfigBuilder {
     pub fn build(self) -> ServerConfig {
         ServerConfig {
             host_key: self.host_key,
+            send_ext_info: self.send_ext_info,
             rng: self.rng.unwrap_or_else(system_rng),
             version: format!("SSH-2.0-{}", self.version.as_deref().unwrap_or("justssh")),
             max_auth_tries: self.max_auth_tries,

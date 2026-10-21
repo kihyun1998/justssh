@@ -3,7 +3,9 @@
 use std::future::Future;
 use std::io;
 
-use justssh::{Action, Client, Closed, DisconnectReason, Event, InfoRequest, Phase, Zeroizing};
+use justssh::{
+    Action, Client, Closed, DisconnectReason, Event, InfoRequest, Phase, PrivateKey, Zeroizing,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::time::{Instant, timeout_at};
 
@@ -19,6 +21,9 @@ pub enum AuthMethod {
     /// Keyboard-interactive (RFC 4256), its questions answered by
     /// [`ClientHandler::answer`].
     KeyboardInteractive,
+    /// `publickey` with each key in turn, until one is accepted or the server stops allowing
+    /// the method.
+    PublicKeys(Vec<PrivateKey>),
 }
 
 impl AuthMethod {
@@ -26,7 +31,63 @@ impl AuthMethod {
         match self {
             AuthMethod::Password(_) => "password",
             AuthMethod::KeyboardInteractive => "keyboard-interactive",
+            AuthMethod::PublicKeys(_) => PUBLICKEY,
         }
+    }
+}
+
+const PUBLICKEY: &str = "publickey";
+
+/// The algorithm an RSA certificate refused under `rsa-sha2-*-cert` is offered under again,
+/// after the other keys.
+const RSA_CERT_COMPAT: &str = "ssh-rsa-cert-v01@openssh.com";
+
+/// The keys of a `publickey` method being tried, the way x/crypto/ssh's `publicKeyCallback`
+/// tries its signers.
+struct KeyQueue<'a> {
+    /// Each key with the algorithm it is to be offered under, or `None` for the one
+    /// `server-sig-algs` leads to.
+    keys: Vec<(&'a PrivateKey, Option<&'static str>)>,
+    /// The number of keys given, before compatibility retries are added.
+    given: usize,
+    /// The key being tried and the algorithm it was offered under.
+    current: usize,
+    algorithm: &'static str,
+    /// The methods of the last failure the method saw.
+    methods: Vec<String>,
+}
+
+impl<'a> KeyQueue<'a> {
+    fn new(keys: &'a [PrivateKey], methods: Vec<String>) -> Self {
+        KeyQueue {
+            keys: keys.iter().map(|k| (k, None)).collect(),
+            given: keys.len(),
+            current: 0,
+            algorithm: "",
+            methods,
+        }
+    }
+
+    /// Offers the key at `index`, or reports that none is left.
+    fn offer(&mut self, client: &mut Client, index: usize) -> Option<Vec<Action>> {
+        let (key, algorithm) = *self.keys.get(index)?;
+        self.current = index;
+        let sig_algs = client.server_sig_algs();
+        self.algorithm = algorithm.unwrap_or_else(|| key.algorithm_for(sig_algs.as_deref()));
+        Some(client.auth_publickey_as(key, self.algorithm))
+    }
+
+    /// After the server refused the current key without a signature: queues the
+    /// compatibility retry of an RSA certificate, and offers the next key.
+    fn refused(&mut self, client: &mut Client) -> Option<Vec<Action>> {
+        let key = self.keys[self.current].0;
+        if self.current < self.given
+            && self.algorithm != RSA_CERT_COMPAT
+            && key.algorithms().contains(&RSA_CERT_COMPAT)
+        {
+            self.keys.push((key, Some(RSA_CERT_COMPAT)));
+        }
+        self.offer(client, self.current + 1)
     }
 }
 
@@ -102,7 +163,9 @@ impl<'a> Picker<'a> {
             return None;
         }
         let next = self.methods.iter().find(|m| {
-            !self.tried.contains(&m.name()) && self.allowed.iter().any(|a| a == m.name())
+            !self.tried.contains(&m.name())
+                && self.allowed.iter().any(|a| a == m.name())
+                && !matches!(m, AuthMethod::PublicKeys(keys) if keys.is_empty())
         })?;
         self.current = next.name();
         Some(next)
@@ -133,6 +196,7 @@ where
     let mut picker = Picker::new(methods);
     let mut auth_started = false;
     let mut exhausted = false;
+    let mut keys: Option<KeyQueue> = None;
     let mut deadline = None;
     let mut actions = client.process(Event::Connected);
     loop {
@@ -143,6 +207,7 @@ where
         let mut host_key = None;
         let mut questions = None;
         let mut failure = None;
+        let mut key_refused = false;
         let mut closed = None;
         for action in actions {
             match action {
@@ -157,6 +222,7 @@ where
                     questions = None;
                     failure = Some((methods, partial_success));
                 }
+                Action::PublicKeyRefused { .. } => key_refused = true,
                 Action::Closed(c) => closed = Some(c),
                 other => events.push(other),
             }
@@ -208,8 +274,37 @@ where
             actions = client.auth_none();
             continue;
         }
+        let failure = match (keys.as_mut(), failure) {
+            (Some(queue), _) if key_refused => match queue.refused(client) {
+                Some(next) => {
+                    actions = next;
+                    continue;
+                }
+                None => Some((queue.methods.clone(), false)),
+            },
+            (Some(queue), Some((methods, false))) if methods.iter().any(|m| m == PUBLICKEY) => {
+                queue.methods = methods.clone();
+                match queue.offer(client, queue.current + 1) {
+                    Some(next) => {
+                        actions = next;
+                        continue;
+                    }
+                    None => Some((methods, false)),
+                }
+            }
+            (_, failure) => failure,
+        };
+        if failure.is_some() {
+            keys = None;
+        }
         if let Some((allowed, partial_success)) = failure {
             actions = match picker.next(allowed, partial_success) {
+                Some(AuthMethod::PublicKeys(list)) => {
+                    let mut queue = KeyQueue::new(list, picker.allowed.clone());
+                    let first = queue.offer(client, 0);
+                    keys = Some(queue);
+                    first.unwrap_or_default()
+                }
                 Some(AuthMethod::Password(password)) => client.auth_password(password.clone()),
                 Some(AuthMethod::KeyboardInteractive) => client.auth_keyboard_interactive(),
                 None => {

@@ -17,6 +17,8 @@ pub const USERAUTH_SUCCESS: u8 = 52;
 pub const USERAUTH_BANNER: u8 = 53;
 /// `SSH_MSG_USERAUTH_INFO_REQUEST` (RFC 4256 §3.2); not decoded by [`Message`](crate::Message).
 pub const USERAUTH_INFO_REQUEST: u8 = 60;
+/// `SSH_MSG_USERAUTH_PK_OK` (RFC 4252 §7), the same number under `publickey`.
+pub const USERAUTH_PK_OK: u8 = 60;
 pub const USERAUTH_INFO_RESPONSE: u8 = 61;
 pub const GLOBAL_REQUEST: u8 = 80;
 pub const REQUEST_SUCCESS: u8 = 81;

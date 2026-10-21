@@ -342,3 +342,322 @@ async fn a_long_exec_lives_through_the_keepalives_sshd_sends_on_its_channel() {
     assert_eq!((run.stdout.as_slice(), run.status), (&b"done\n"[..], 0));
     assert!(run.keepalives >= 3, "{} keepalives in 4 s", run.keepalives);
 }
+
+#[path = "../../justssh/tests/common/test_keys.rs"]
+mod test_keys;
+
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64(data: &[u8]) -> String {
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(BASE64[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn unbase64(text: &str) -> Vec<u8> {
+    let mut bits = 0u32;
+    let mut count = 0;
+    let mut out = Vec::new();
+    for c in text.bytes().filter(|&c| c != b'=') {
+        let v = BASE64.iter().position(|&x| x == c).expect("base64") as u32;
+        bits = bits << 6 | v;
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+        }
+    }
+    out
+}
+
+/// The keys the public key sshd authorises, by name.
+fn authorised_keys() -> Vec<(&'static str, justssh::PrivateKey)> {
+    use justssh::{EcdsaCurve, PrivateKey};
+    vec![
+        ("ed25519", PrivateKey::ed25519(Zeroizing::new([3; 32]))),
+        (
+            "ecdsa-p256",
+            PrivateKey::ecdsa(EcdsaCurve::P256, Zeroizing::new(vec![2; 32])).unwrap(),
+        ),
+        (
+            "ecdsa-p384",
+            PrivateKey::ecdsa(EcdsaCurve::P384, Zeroizing::new(vec![2; 48])).unwrap(),
+        ),
+        (
+            "ecdsa-p521",
+            PrivateKey::ecdsa(EcdsaCurve::P521, Zeroizing::new(vec![1; 66])).unwrap(),
+        ),
+        (
+            "rsa",
+            PrivateKey::rsa(
+                &hex(test_keys::RSA_N),
+                &hex(test_keys::RSA_E),
+                Zeroizing::new(hex(test_keys::RSA_D)),
+                Zeroizing::new(hex(test_keys::RSA_P)),
+                Zeroizing::new(hex(test_keys::RSA_Q)),
+            )
+            .unwrap(),
+        ),
+    ]
+}
+
+/// A key the sshd does not authorise, certified by the CA it trusts.
+fn certified_key(dir: &str) -> justssh::PrivateKey {
+    let key = justssh::PrivateKey::ed25519(Zeroizing::new([4; 32]));
+    certify(dir, "ed25519", key)
+}
+
+/// `key` under a certificate the CA in `dir` issues for user `justssh`, signed by `ssh-keygen`.
+fn certify(dir: &str, name: &str, key: justssh::PrivateKey) -> justssh::PrivateKey {
+    let cert = certificate(dir, name, &key);
+    key.with_certificate(cert).unwrap()
+}
+
+/// The keys directory the public key sshd reads, set up once: `authorized_keys` with every
+/// [`authorised_keys`] entry, and a CA from `ssh-keygen` in `ca.pub`.
+fn keys_dir() -> Option<String> {
+    let Ok(dir) = std::env::var("JUSTSSH_SSHD_KEYS_DIR") else {
+        assert!(
+            std::env::var_os("JUSTSSH_REQUIRE_SSHD").is_none(),
+            "JUSTSSH_REQUIRE_SSHD is set but JUSTSSH_SSHD_KEYS_DIR is not"
+        );
+        eprintln!("skipped: JUSTSSH_SSHD_KEYS_DIR not set");
+        return None;
+    };
+    static SETUP: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    SETUP.get_or_init(|| {
+        let lines: String = authorised_keys()
+            .iter()
+            .map(|(name, key)| {
+                let blob = key.public_blob();
+                let mut r = justssh_wire::Reader::new(&blob);
+                format!("{} {} {name}\n", r.utf8().unwrap(), base64(&blob))
+            })
+            .collect();
+        std::fs::write(format!("{dir}/authorized_keys"), lines).unwrap();
+        let ca = format!("{dir}/ca");
+        let _ = std::fs::remove_file(&ca);
+        let _ = std::fs::remove_file(format!("{ca}.pub"));
+        ssh_keygen(&["-q", "-t", "ed25519", "-N", "", "-f", &ca]);
+    });
+    Some(dir)
+}
+
+fn ssh_keygen(args: &[&str]) {
+    let status = std::process::Command::new("ssh-keygen")
+        .args(args)
+        .status()
+        .expect("ssh-keygen");
+    assert!(status.success(), "ssh-keygen {args:?}");
+}
+
+/// The certificate the CA in `dir` issues for `key`, for user `justssh`, under file name `name`.
+fn certificate(dir: &str, name: &str, key: &justssh::PrivateKey) -> Vec<u8> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = LOCK.lock().unwrap();
+    let blob = key.public_blob();
+    let key_type = justssh_wire::Reader::new(&blob).utf8().unwrap().to_owned();
+    let user = format!("{dir}/user-{name}.pub");
+    std::fs::write(&user, format!("{key_type} {}\n", base64(&blob))).unwrap();
+    ssh_keygen(&[
+        "-q",
+        "-s",
+        &format!("{dir}/ca"),
+        "-I",
+        "justssh-test",
+        "-n",
+        "justssh",
+        "-V",
+        "-5m:+1h",
+        &user,
+    ]);
+    let text = std::fs::read_to_string(format!("{dir}/user-{name}-cert.pub")).unwrap();
+    unbase64(text.split_whitespace().nth(1).unwrap())
+}
+
+/// Connects to the sshd in `var` with `keys` and nothing else; how it ended and the client.
+async fn log_in_with_keys(
+    var: &str,
+    keys: Vec<justssh::PrivateKey>,
+) -> Option<(Connected<TcpStream>, Client)> {
+    let (addr, user, _) = target(var)?;
+    keys_dir()?;
+    let io = TcpStream::connect(&addr).await.unwrap();
+    let mut client = Client::new(ClientConfig::builder(&user).build());
+    let mut broker = Broker {
+        password: Vec::new(),
+        prompts: Vec::new(),
+        host_key: None,
+    };
+    let connected = justssh_tokio::connect(
+        io,
+        &mut client,
+        &Deadlines::new(),
+        &[AuthMethod::PublicKeys(keys)],
+        &mut broker,
+    )
+    .await
+    .unwrap();
+    Some((connected, client))
+}
+
+#[tokio::test]
+async fn logs_in_to_sshd_with_ed25519_ecdsa_and_rsa_keys() {
+    for (name, key) in authorised_keys() {
+        let Some((connected, client)) =
+            log_in_with_keys("JUSTSSH_SSHD_KEYS_ADDR", vec![key.clone()]).await
+        else {
+            return;
+        };
+        assert!(
+            matches!(connected, Connected::Authenticated { .. }),
+            "{name}: {connected:?}"
+        );
+        let sig_algs = client.server_sig_algs();
+        let algorithm = key.algorithm_for(sig_algs.as_deref());
+        if name == "rsa" {
+            assert_eq!(algorithm, "rsa-sha2-256");
+        }
+        eprintln!("{name}: signed under {algorithm}");
+    }
+}
+
+#[tokio::test]
+async fn logs_in_to_sshd_with_an_openssh_certificate() {
+    let (Some(_), Some(dir)) = (target("JUSTSSH_SSHD_KEYS_ADDR"), keys_dir()) else {
+        return;
+    };
+    let key = certified_key(&dir);
+    let (connected, _) = log_in_with_keys("JUSTSSH_SSHD_KEYS_ADDR", vec![key])
+        .await
+        .unwrap();
+    assert!(
+        matches!(connected, Connected::Authenticated { .. }),
+        "{connected:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_key_sshd_does_not_authorise_is_refused() {
+    let stranger = justssh::PrivateKey::ed25519(Zeroizing::new([4; 32]));
+    let Some((connected, _)) = log_in_with_keys("JUSTSSH_SSHD_KEYS_ADDR", vec![stranger]).await
+    else {
+        return;
+    };
+    assert!(
+        matches!(&connected, Connected::NoMethodLeft { tried, .. } if tried.contains(&"publickey")),
+        "{connected:?}"
+    );
+}
+
+#[tokio::test]
+async fn rsa_signs_with_ssh_rsa_where_sshd_accepts_only_ssh_rsa() {
+    let rsa = authorised_keys().pop().unwrap().1;
+    let Some((connected, client)) =
+        log_in_with_keys("JUSTSSH_SSHD_SSH_RSA_ADDR", vec![rsa.clone()]).await
+    else {
+        return;
+    };
+    let sig_algs = client.server_sig_algs();
+    eprintln!("server-sig-algs: {sig_algs:?}");
+    assert_eq!(rsa.algorithm_for(sig_algs.as_deref()), "ssh-rsa");
+    assert!(
+        matches!(connected, Connected::Authenticated { .. }),
+        "{connected:?}"
+    );
+}
+
+/// The authorised RSA key.
+fn rsa_key() -> justssh::PrivateKey {
+    authorised_keys().pop().unwrap().1
+}
+
+#[tokio::test]
+async fn logs_in_to_sshd_with_rsa_and_ecdsa_certificates() {
+    let (Some(_), Some(dir)) = (target("JUSTSSH_SSHD_KEYS_ADDR"), keys_dir()) else {
+        return;
+    };
+    let p256 =
+        justssh::PrivateKey::ecdsa(justssh::EcdsaCurve::P256, Zeroizing::new(vec![5; 32])).unwrap();
+    for (name, key) in [
+        ("rsa", certify(&dir, "rsa", rsa_key())),
+        ("ecdsa-p256", certify(&dir, "ecdsa-p256", p256)),
+    ] {
+        let (connected, client) = log_in_with_keys("JUSTSSH_SSHD_KEYS_ADDR", vec![key.clone()])
+            .await
+            .unwrap();
+        assert!(
+            matches!(connected, Connected::Authenticated { .. }),
+            "{name}: {connected:?}"
+        );
+        let algorithm = key.algorithm_for(client.server_sig_algs().as_deref());
+        eprintln!("{name} certificate: signed under {algorithm}");
+        if name == "rsa" {
+            assert_eq!(algorithm, "rsa-sha2-256-cert-v01@openssh.com");
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_rsa_certificate_signs_with_ssh_rsa_where_sshd_accepts_only_ssh_rsa() {
+    let (Some(_), Some(dir)) = (target("JUSTSSH_SSHD_SSH_RSA_ADDR"), keys_dir()) else {
+        return;
+    };
+    let key = certify(&dir, "rsa", rsa_key());
+    let (connected, client) = log_in_with_keys("JUSTSSH_SSHD_SSH_RSA_ADDR", vec![key.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        key.algorithm_for(client.server_sig_algs().as_deref()),
+        "ssh-rsa-cert-v01@openssh.com"
+    );
+    assert!(
+        matches!(connected, Connected::Authenticated { .. }),
+        "{connected:?}"
+    );
+}
+
+#[tokio::test]
+async fn logs_in_to_openssh_8_7_with_keys_and_a_certificate() {
+    let (Some(_), Some(dir)) = (target("JUSTSSH_SSHD_RHEL9_ADDR"), keys_dir()) else {
+        return;
+    };
+    for (name, key) in authorised_keys()
+        .into_iter()
+        .chain([("ed25519 certificate", certified_key(&dir))])
+    {
+        let (connected, client) = log_in_with_keys("JUSTSSH_SSHD_RHEL9_ADDR", vec![key.clone()])
+            .await
+            .unwrap();
+        assert!(
+            matches!(connected, Connected::Authenticated { .. }),
+            "{name}: {connected:?}"
+        );
+        let algorithm = key.algorithm_for(client.server_sig_algs().as_deref());
+        eprintln!("8.7 {name}: signed under {algorithm}");
+        if name == "rsa" {
+            eprintln!("8.7 server-sig-algs: {:?}", client.server_sig_algs());
+        }
+    }
+}
