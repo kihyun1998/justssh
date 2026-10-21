@@ -568,6 +568,7 @@ name = "justssh-tokio"
 version = "0.1.0"
 dependencies = [
  "justssh",
+ "justssh-wire",
  "tokio",
 ]
 

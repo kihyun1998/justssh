@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 48bc5c0805f56254c157089438c64cbe97c83b089fb020e470ae73b2c967a673 # shrinks to m = ChannelRequest(ChannelRequest { recipient: 0, kind: "a", want_reply: false, data: [] })
+cc c9830560b29b7dd105ff4a03955c09038c0530a58be1973416474c2b86741523 # shrinks to m = ChannelExtendedData(ChannelExtendedData { recipient: 0, code: 0, data: [] })

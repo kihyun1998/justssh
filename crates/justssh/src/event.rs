@@ -5,6 +5,7 @@ use core::fmt;
 use justssh_wire::DecodeError;
 use zeroize::Zeroizing;
 
+use crate::connection::{ChannelId, ChannelOpenRequest, ChannelRequest};
 use crate::handshake::{AlgorithmCategory, Handshake};
 
 /// Input to [`Server::process`](crate::Server::process) and
@@ -33,6 +34,26 @@ pub enum Action {
     /// A client asks to authenticate with a password. Nothing further is processed until the
     /// consumer answers with [`Event::AuthAccepted`] or [`Event::AuthRejected`].
     PasswordRequest(PasswordRequest),
+    /// The peer asks to open a channel.
+    ChannelOpenRequest(ChannelOpenRequest),
+    /// A channel request from the peer, passed through unparsed.
+    ChannelRequest(ChannelRequest),
+    /// Data the peer sent on a channel. Report it with `channel_consumed` once taken, so the
+    /// peer's window is given back.
+    ChannelData { channel: ChannelId, data: Vec<u8> },
+    /// Extended data of any type (1 is stderr). Reported to `channel_consumed` like data.
+    ChannelExtendedData {
+        channel: ChannelId,
+        code: u32,
+        data: Vec<u8>,
+    },
+    /// The peer will send no more data on the channel.
+    ChannelEof { channel: ChannelId },
+    /// The channel is closed in both directions and its id is free.
+    ChannelClosed { channel: ChannelId },
+    /// The reply to a channel request this side sent with `want_reply`; replies arrive in the
+    /// order the requests were sent.
+    ChannelRequestReply { channel: ChannelId, ok: bool },
     /// The connection is over; nothing more will be written or accepted.
     Closed(Closed),
     /// A payload received after the first key exchange, handed over undecoded instead of being
@@ -177,6 +198,14 @@ pub enum Error {
     DeadlineExceeded,
     /// More input arrived while a verdict was pending than one packet could hold.
     InputOverflow,
+    /// A message named a channel that is not open.
+    UnknownChannel { channel: u32 },
+    /// The peer sent more channel data than the window allowed.
+    ChannelWindowExceeded,
+    /// The peer sent channel data larger than the maximum packet this side announced.
+    ChannelPacketTooLarge,
+    /// A window adjustment would take the peer's window past 2^32 − 1.
+    ChannelWindowOverflow,
     /// A sequence number would repeat under one key.
     SequenceWrap,
 }
@@ -201,6 +230,12 @@ impl fmt::Display for Error {
             Error::TooManyAuthAttempts => f.write_str("too many authentication attempts"),
             Error::DeadlineExceeded => f.write_str("deadline exceeded"),
             Error::InputOverflow => f.write_str("too much input while a verdict was pending"),
+            Error::UnknownChannel { channel } => write!(f, "unknown channel {channel}"),
+            Error::ChannelWindowExceeded => f.write_str("channel data exceeds the window"),
+            Error::ChannelPacketTooLarge => {
+                f.write_str("channel data exceeds the maximum packet size")
+            }
+            Error::ChannelWindowOverflow => f.write_str("channel window overflow"),
             Error::SequenceWrap => f.write_str("sequence number would repeat under one key"),
         }
     }

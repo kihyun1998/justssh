@@ -64,7 +64,17 @@ pub struct ServerConfig {
     pub(crate) rng: BoxRng,
     pub(crate) version: String,
     pub(crate) max_auth_tries: u32,
+    pub(crate) channel_window: u32,
+    pub(crate) channel_max_packet: u32,
 }
+
+/// x/crypto/ssh's channel window: 64 maximum packets.
+pub(crate) const DEFAULT_CHANNEL_WINDOW: u32 = 64 * DEFAULT_CHANNEL_MAX_PACKET;
+/// x/crypto/ssh's maximum channel data per packet.
+pub(crate) const DEFAULT_CHANNEL_MAX_PACKET: u32 = 1 << 15;
+/// The largest maximum packet that still fits the transport's largest packet with room for the
+/// message header.
+const MAX_CHANNEL_MAX_PACKET: u32 = 256 * 1024 - 64;
 
 impl ServerConfig {
     /// A builder for a server presenting `host_key`.
@@ -74,6 +84,8 @@ impl ServerConfig {
             rng: None,
             version: None,
             max_auth_tries: 6,
+            channel_window: DEFAULT_CHANNEL_WINDOW,
+            channel_max_packet: DEFAULT_CHANNEL_MAX_PACKET,
         }
     }
 }
@@ -84,9 +96,35 @@ pub struct ServerConfigBuilder {
     rng: Option<BoxRng>,
     version: Option<String>,
     max_auth_tries: u32,
+    channel_window: u32,
+    channel_max_packet: u32,
 }
 
 impl ServerConfigBuilder {
+    /// The window each accepted channel starts with. Defaults to 2 MiB, as x/crypto/ssh.
+    ///
+    /// # Panics
+    /// If `bytes` is 0.
+    pub fn channel_window(mut self, bytes: u32) -> Self {
+        assert!(bytes > 0, "channel window must not be 0");
+        self.channel_window = bytes;
+        self
+    }
+
+    /// The most data the peer may put in one channel packet. Defaults to 32 KiB, as
+    /// x/crypto/ssh.
+    ///
+    /// # Panics
+    /// If `bytes` is 0 or too large for the transport's largest packet.
+    pub fn channel_max_packet(mut self, bytes: u32) -> Self {
+        assert!(
+            (1..=MAX_CHANNEL_MAX_PACKET).contains(&bytes),
+            "channel maximum packet {bytes} out of range"
+        );
+        self.channel_max_packet = bytes;
+        self
+    }
+
     /// Failed authentication attempts after which the server disconnects. Defaults to 6,
     /// x/crypto/ssh's `MaxAuthTries` default. The client's first `none` request does not count.
     pub fn max_auth_tries(mut self, limit: NonZeroU32) -> Self {
@@ -131,6 +169,8 @@ impl ServerConfigBuilder {
             rng: self.rng.unwrap_or_else(system_rng),
             version: format!("SSH-2.0-{}", self.version.as_deref().unwrap_or("justssh")),
             max_auth_tries: self.max_auth_tries,
+            channel_window: self.channel_window,
+            channel_max_packet: self.channel_max_packet,
         }
     }
 }

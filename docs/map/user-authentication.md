@@ -28,7 +28,7 @@ A `password` request whose first byte is `TRUE` asks to change the password (RFC
 
 ## The adapter stops at authentication
 
-`justssh_tokio::accept` returns as soon as the client is authenticated, handing back the stream and what the verdict callback returned, the way x/crypto/ssh's `NewServerConn` returns after authentication. The connection protocol runs from there in a separate step. The callback runs under the deadline and is dropped if it passes, so whatever it opens must be released on drop.
+`justssh_tokio::accept` returns as soon as the client is authenticated, handing back the stream and what the verdict callback returned, the way x/crypto/ssh's `NewServerConn` returns after authentication. The connection protocol runs from there in a separate step, `Session`, which starts from the `events` `accept` returns: whatever the peer sent right behind its authentication request, such as a channel open, is handled with the last authentication step and must not be dropped. The callback runs under the deadline and is dropped if it passes, so whatever it opens must be released on drop.
 
 ## A verdict answers whatever request is pending
 

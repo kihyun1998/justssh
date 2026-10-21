@@ -13,7 +13,15 @@ pub struct Client {
 impl Client {
     pub fn new(config: ClientConfig) -> Self {
         Client {
-            transport: Transport::new(Role::Client, None, config.rng, config.version, 0),
+            transport: Transport::new(
+                Role::Client,
+                None,
+                config.rng,
+                config.version,
+                0,
+                crate::config::DEFAULT_CHANNEL_WINDOW,
+                crate::config::DEFAULT_CHANNEL_MAX_PACKET,
+            ),
         }
     }
 

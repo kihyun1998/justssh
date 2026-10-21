@@ -179,6 +179,17 @@ pub enum Message {
     UserauthSuccess(UserauthSuccess),
     Ping(Ping),
     Pong(Pong),
+    ChannelOpen(ChannelOpen),
+    ChannelOpenConfirmation(ChannelOpenConfirmation),
+    ChannelOpenFailure(ChannelOpenFailure),
+    ChannelWindowAdjust(ChannelWindowAdjust),
+    ChannelData(ChannelData),
+    ChannelExtendedData(ChannelExtendedData),
+    ChannelEof(ChannelEof),
+    ChannelClose(ChannelClose),
+    ChannelRequest(ChannelRequest),
+    ChannelSuccess(ChannelSuccess),
+    ChannelFailure(ChannelFailure),
     /// A message number this crate has no decoder for; its body is not read.
     Unknown(u8),
 }
@@ -268,6 +279,62 @@ impl Message {
             }
             Message::Pong(m) => {
                 w.u8(number::PONG).string(&m.data);
+            }
+            Message::ChannelOpen(m) => {
+                w.u8(number::CHANNEL_OPEN)
+                    .string(m.kind.as_bytes())
+                    .u32(m.sender)
+                    .u32(m.window)
+                    .u32(m.max_packet)
+                    .bytes(&m.data);
+            }
+            Message::ChannelOpenConfirmation(m) => {
+                w.u8(number::CHANNEL_OPEN_CONFIRMATION)
+                    .u32(m.recipient)
+                    .u32(m.sender)
+                    .u32(m.window)
+                    .u32(m.max_packet)
+                    .bytes(&m.data);
+            }
+            Message::ChannelOpenFailure(m) => {
+                w.u8(number::CHANNEL_OPEN_FAILURE)
+                    .u32(m.recipient)
+                    .u32(m.reason)
+                    .string(m.description.as_bytes())
+                    .string(m.language.as_bytes());
+            }
+            Message::ChannelWindowAdjust(m) => {
+                w.u8(number::CHANNEL_WINDOW_ADJUST)
+                    .u32(m.recipient)
+                    .u32(m.bytes);
+            }
+            Message::ChannelData(m) => {
+                w.u8(number::CHANNEL_DATA).u32(m.recipient).string(&m.data);
+            }
+            Message::ChannelExtendedData(m) => {
+                w.u8(number::CHANNEL_EXTENDED_DATA)
+                    .u32(m.recipient)
+                    .u32(m.code)
+                    .string(&m.data);
+            }
+            Message::ChannelEof(m) => {
+                w.u8(number::CHANNEL_EOF).u32(m.recipient);
+            }
+            Message::ChannelClose(m) => {
+                w.u8(number::CHANNEL_CLOSE).u32(m.recipient);
+            }
+            Message::ChannelRequest(m) => {
+                w.u8(number::CHANNEL_REQUEST)
+                    .u32(m.recipient)
+                    .string(m.kind.as_bytes())
+                    .bool(m.want_reply)
+                    .bytes(&m.data);
+            }
+            Message::ChannelSuccess(m) => {
+                w.u8(number::CHANNEL_SUCCESS).u32(m.recipient);
+            }
+            Message::ChannelFailure(m) => {
+                w.u8(number::CHANNEL_FAILURE).u32(m.recipient);
             }
             Message::Unknown(n) => {
                 w.u8(*n);
@@ -360,6 +427,55 @@ impl Message {
             number::USERAUTH_SUCCESS => Message::UserauthSuccess(UserauthSuccess),
             number::PING => Message::Ping(Ping::new(r.string()?.to_vec())),
             number::PONG => Message::Pong(Pong::new(r.string()?.to_vec())),
+            number::CHANNEL_OPEN => {
+                let kind = r.utf8()?.to_owned();
+                let (sender, window, max_packet) = (r.u32()?, r.u32()?, r.u32()?);
+                let data = r.remaining().to_vec();
+                return Ok(Message::ChannelOpen(ChannelOpen::new(
+                    kind, sender, window, max_packet, data,
+                )));
+            }
+            number::CHANNEL_OPEN_CONFIRMATION => {
+                let (recipient, sender, window, max_packet) =
+                    (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+                let data = r.remaining().to_vec();
+                return Ok(Message::ChannelOpenConfirmation(
+                    ChannelOpenConfirmation::new(recipient, sender, window, max_packet, data),
+                ));
+            }
+            number::CHANNEL_OPEN_FAILURE => {
+                let (recipient, reason) = (r.u32()?, r.u32()?);
+                let description = String::from_utf8_lossy(r.string()?).into_owned();
+                let language = String::from_utf8_lossy(r.string()?).into_owned();
+                Message::ChannelOpenFailure(ChannelOpenFailure::new(
+                    recipient,
+                    reason,
+                    description,
+                    language,
+                ))
+            }
+            number::CHANNEL_WINDOW_ADJUST => {
+                Message::ChannelWindowAdjust(ChannelWindowAdjust::new(r.u32()?, r.u32()?))
+            }
+            number::CHANNEL_DATA => {
+                Message::ChannelData(ChannelData::new(r.u32()?, r.string()?.to_vec()))
+            }
+            number::CHANNEL_EXTENDED_DATA => Message::ChannelExtendedData(
+                ChannelExtendedData::new(r.u32()?, r.u32()?, r.string()?.to_vec()),
+            ),
+            number::CHANNEL_EOF => Message::ChannelEof(ChannelEof::new(r.u32()?)),
+            number::CHANNEL_CLOSE => Message::ChannelClose(ChannelClose::new(r.u32()?)),
+            number::CHANNEL_REQUEST => {
+                let recipient = r.u32()?;
+                let kind = r.utf8()?.to_owned();
+                let want_reply = r.bool()?;
+                let data = r.remaining().to_vec();
+                return Ok(Message::ChannelRequest(ChannelRequest::new(
+                    recipient, kind, want_reply, data,
+                )));
+            }
+            number::CHANNEL_SUCCESS => Message::ChannelSuccess(ChannelSuccess::new(r.u32()?)),
+            number::CHANNEL_FAILURE => Message::ChannelFailure(ChannelFailure::new(r.u32()?)),
             other => return Ok(Message::Unknown(other)),
         };
         r.finish()?;
@@ -465,5 +581,198 @@ pub struct Pong {
 impl Pong {
     pub fn new(data: Vec<u8>) -> Self {
         Pong { data }
+    }
+}
+
+/// `SSH_MSG_CHANNEL_OPEN` (RFC 4254 §5.1). `data` is the channel-type-specific part, undecoded.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelOpen {
+    pub kind: String,
+    pub sender: u32,
+    pub window: u32,
+    pub max_packet: u32,
+    pub data: Vec<u8>,
+}
+
+impl ChannelOpen {
+    pub fn new(kind: String, sender: u32, window: u32, max_packet: u32, data: Vec<u8>) -> Self {
+        ChannelOpen {
+            kind,
+            sender,
+            window,
+            max_packet,
+            data,
+        }
+    }
+}
+
+/// `SSH_MSG_CHANNEL_OPEN_CONFIRMATION`. `data` is the channel-type-specific part, undecoded.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelOpenConfirmation {
+    pub recipient: u32,
+    pub sender: u32,
+    pub window: u32,
+    pub max_packet: u32,
+    pub data: Vec<u8>,
+}
+
+impl ChannelOpenConfirmation {
+    pub fn new(recipient: u32, sender: u32, window: u32, max_packet: u32, data: Vec<u8>) -> Self {
+        ChannelOpenConfirmation {
+            recipient,
+            sender,
+            window,
+            max_packet,
+            data,
+        }
+    }
+}
+
+/// `SSH_MSG_CHANNEL_OPEN_FAILURE`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelOpenFailure {
+    pub recipient: u32,
+    pub reason: u32,
+    pub description: String,
+    pub language: String,
+}
+
+impl ChannelOpenFailure {
+    pub fn new(
+        recipient: u32,
+        reason: u32,
+        description: impl Into<String>,
+        language: impl Into<String>,
+    ) -> Self {
+        ChannelOpenFailure {
+            recipient,
+            reason,
+            description: description.into(),
+            language: language.into(),
+        }
+    }
+}
+
+/// `SSH_MSG_CHANNEL_WINDOW_ADJUST`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelWindowAdjust {
+    pub recipient: u32,
+    pub bytes: u32,
+}
+
+impl ChannelWindowAdjust {
+    pub fn new(recipient: u32, bytes: u32) -> Self {
+        ChannelWindowAdjust { recipient, bytes }
+    }
+}
+
+/// `SSH_MSG_CHANNEL_DATA`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelData {
+    pub recipient: u32,
+    pub data: Vec<u8>,
+}
+
+impl ChannelData {
+    pub fn new(recipient: u32, data: Vec<u8>) -> Self {
+        ChannelData { recipient, data }
+    }
+}
+
+/// `SSH_MSG_CHANNEL_EXTENDED_DATA`; `code` 1 is stderr.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelExtendedData {
+    pub recipient: u32,
+    pub code: u32,
+    pub data: Vec<u8>,
+}
+
+impl ChannelExtendedData {
+    pub fn new(recipient: u32, code: u32, data: Vec<u8>) -> Self {
+        ChannelExtendedData {
+            recipient,
+            code,
+            data,
+        }
+    }
+}
+
+/// `SSH_MSG_CHANNEL_EOF`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelEof {
+    pub recipient: u32,
+}
+
+impl ChannelEof {
+    pub fn new(recipient: u32) -> Self {
+        ChannelEof { recipient }
+    }
+}
+
+/// `SSH_MSG_CHANNEL_CLOSE`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelClose {
+    pub recipient: u32,
+}
+
+impl ChannelClose {
+    pub fn new(recipient: u32) -> Self {
+        ChannelClose { recipient }
+    }
+}
+
+/// `SSH_MSG_CHANNEL_REQUEST` (RFC 4254 §5.4). `data` is the request-type-specific part,
+/// undecoded.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelRequest {
+    pub recipient: u32,
+    pub kind: String,
+    pub want_reply: bool,
+    pub data: Vec<u8>,
+}
+
+impl ChannelRequest {
+    pub fn new(recipient: u32, kind: String, want_reply: bool, data: Vec<u8>) -> Self {
+        ChannelRequest {
+            recipient,
+            kind,
+            want_reply,
+            data,
+        }
+    }
+}
+
+/// `SSH_MSG_CHANNEL_SUCCESS`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelSuccess {
+    pub recipient: u32,
+}
+
+impl ChannelSuccess {
+    pub fn new(recipient: u32) -> Self {
+        ChannelSuccess { recipient }
+    }
+}
+
+/// `SSH_MSG_CHANNEL_FAILURE`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelFailure {
+    pub recipient: u32,
+}
+
+impl ChannelFailure {
+    pub fn new(recipient: u32) -> Self {
+        ChannelFailure { recipient }
     }
 }
