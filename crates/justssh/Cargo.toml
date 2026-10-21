@@ -9,13 +9,13 @@ repository.workspace = true
 [dependencies]
 justssh-wire.workspace = true
 sha1.workspace = true
-sha2.workspace = true
+sha2 = { workspace = true, features = ["zeroize"] }
 hmac.workspace = true
 aes.workspace = true
 ctr.workspace = true
 aes-gcm.workspace = true
-chacha20.workspace = true
-poly1305.workspace = true
+chacha20 = { workspace = true, features = ["legacy", "zeroize"] }
+poly1305 = { workspace = true, features = ["zeroize"] }
 ed25519-dalek.workspace = true
 x25519-dalek.workspace = true
 p256.workspace = true
@@ -25,9 +25,13 @@ ml-kem.workspace = true
 crypto-bigint.workspace = true
 rsa.workspace = true
 rand_core.workspace = true
-getrandom.workspace = true
+getrandom = { workspace = true, features = ["sys_rng"] }
 subtle.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+x25519-dalek = { workspace = true, features = ["static_secrets"] }
 
 [lints]
 workspace = true

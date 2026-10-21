@@ -10,5 +10,8 @@ repository.workspace = true
 justssh.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "time", "rt"] }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process"] }
+
 [lints]
 workspace = true
