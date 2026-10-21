@@ -27,3 +27,9 @@ The identification line and every line before it count against 255 bytes togethe
 ## The table decides, dispatch also refuses
 
 `allowed::verdict` is where a message is accepted or refused. `Transport::dispatch` also refuses any accepted message it has no handler for, so a wrong `Accept` in the table still closes the connection. A test that only checks that the connection closed — `userauth_success_sent_to_a_server_closes_the_connection` — therefore stays green when the table alone is wrong (measured on #3); the table itself is what the fuzz target (#14) is for.
+
+## Unknown means no decoder in justssh-wire
+
+After authentication a message number `justssh_wire::number::is_known` does not list is answered with `SSH_MSG_UNIMPLEMENTED` carrying that packet's sequence number, and the connection stays (ADR-0002; OpenSSH `dispatch.c` `dispatch_protocol_error` sends the same). A number it lists that the table does not allow in that stage still ends the connection, where OpenSSH would answer `UNIMPLEMENTED` too. So adding a decoder for a new number moves that number from "answered" to "refused" until the table allows it; a wire test checks that `is_known` and the decoder agree on all 256 numbers. Before authentication every unknown number ends the connection, as x/crypto/ssh does.
+
+Each answer is larger than what it answers: measured on #6, 10k one-byte unknown packets took 280,000 bytes in and 360,000 out (`PING` is 1.00). Only an authenticated peer can do it, and the adapter flushes before it reads, so a peer that does not read stalls the server rather than growing its buffer. Left so on #6.

@@ -29,12 +29,14 @@ pub(crate) enum Verdict {
     Disconnect,
     /// Drop it without a reply (RFC 4252 §5: requests after `SSH_MSG_USERAUTH_SUCCESS`).
     Ignore,
+    /// Answer `SSH_MSG_UNIMPLEMENTED` and carry on (RFC 4253 §11.4).
+    Unimplemented,
 }
 
 /// The verdict for message `n` arriving at `role` in `stage`. `strict_initial` is true while
 /// strict key exchange is in force and the first key exchange has not finished.
 pub(crate) fn verdict(role: Role, stage: Stage, n: u8, strict_initial: bool) -> Verdict {
-    use Verdict::{Accept, Disconnect, Ignore};
+    use Verdict::{Accept, Disconnect, Ignore, Unimplemented};
 
     let accept_if = |ok: bool| if ok { Accept } else { Disconnect };
     match n {
@@ -49,7 +51,9 @@ pub(crate) fn verdict(role: Role, stage: Stage, n: u8, strict_initial: bool) -> 
         number::USERAUTH_REQUEST if role == Role::Server && stage == Stage::Connected => Ignore,
         number::USERAUTH_REQUEST => accept_if(role == Role::Server && stage == Stage::Auth),
         number::PING | number::PONG => accept_if(stage == Stage::Connected),
+        number::GLOBAL_REQUEST..=number::REQUEST_FAILURE => accept_if(stage == Stage::Connected),
         number::CHANNEL_OPEN..=number::CHANNEL_FAILURE => accept_if(stage == Stage::Connected),
+        n if !number::is_known(n) && stage == Stage::Connected => Unimplemented,
         _ => Disconnect,
     }
 }

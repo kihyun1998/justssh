@@ -5,7 +5,8 @@ use std::io;
 use std::time::Duration;
 
 use justssh::{
-    Action, ChannelId, Closed, Event, OpenFailureReason, PasswordRequest, Phase, ReplyToken, Server,
+    Action, ChannelId, Closed, Event, GlobalReplyToken, OpenFailureReason, PasswordRequest, Phase,
+    ReplyToken, Server,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
@@ -313,6 +314,28 @@ where
 
     pub async fn reply(&mut self, token: ReplyToken, ok: bool) -> io::Result<()> {
         let actions = self.server.reply_channel_request(token, ok);
+        self.send(actions).await
+    }
+
+    /// Sends a global request; a reply, when asked for, comes from [`next`](Session::next) as
+    /// [`Action::GlobalRequestReply`].
+    pub async fn global_request(
+        &mut self,
+        kind: &str,
+        want_reply: bool,
+        data: Vec<u8>,
+    ) -> io::Result<()> {
+        let actions = self.server.global_request(kind, want_reply, data);
+        self.send(actions).await
+    }
+
+    pub async fn reply_global(
+        &mut self,
+        token: GlobalReplyToken,
+        ok: bool,
+        data: Vec<u8>,
+    ) -> io::Result<()> {
+        let actions = self.server.reply_global_request(token, ok, data);
         self.send(actions).await
     }
 

@@ -11,7 +11,8 @@ mod transport;
 pub use client::Client;
 pub use config::{ClientConfig, ClientConfigBuilder, HostKey, ServerConfig, ServerConfigBuilder};
 pub use connection::{
-    ChannelId, ChannelInfo, ChannelOpenRequest, ChannelRequest, OpenFailureReason, ReplyToken,
+    ChannelId, ChannelInfo, ChannelOpenRequest, ChannelRequest, GlobalReplyToken, GlobalRequest,
+    OpenFailureReason, ReplyToken,
 };
 pub use event::{Action, Closed, DisconnectReason, Error, Event, PasswordRequest, Phase};
 pub use handshake::{AlgorithmCategory, Algorithms, Handshake, KexInitRecord};

@@ -1,13 +1,14 @@
-//! The connection protocol's channels (RFC 4254 §5), shared by both roles. Channel opens and
-//! requests pass through opaque (ADR-0001); the table keeps ids, windows and the per-channel
-//! order of what the consumer sends.
+//! The connection protocol (RFC 4254), shared by both roles: global requests (§4) and channels
+//! (§5). Requests and channel opens pass through opaque (ADR-0001); the table keeps ids,
+//! windows, reply order and the per-channel order of what the consumer sends.
 
 use std::collections::{BTreeMap, VecDeque};
 
 use justssh_wire::{
     ChannelClose, ChannelData, ChannelEof, ChannelExtendedData, ChannelFailure,
     ChannelOpenConfirmation, ChannelOpenFailure, ChannelRequest as WireRequest, ChannelSuccess,
-    ChannelWindowAdjust, Message,
+    ChannelWindowAdjust, GlobalRequest as WireGlobalRequest, Message, RequestFailure,
+    RequestSuccess,
 };
 
 use crate::event::{Action, DisconnectReason, Error};
@@ -28,6 +29,42 @@ impl ChannelId {
 pub struct ReplyToken {
     channel: u32,
     seq: u64,
+}
+
+/// Identifies a received global request that asked for a reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GlobalReplyToken {
+    seq: u64,
+}
+
+/// A global request from the peer. When it wants a reply, answer it through `reply`.
+#[derive(Debug, Clone)]
+pub struct GlobalRequest {
+    kind: String,
+    want_reply: bool,
+    data: Vec<u8>,
+    reply: Option<GlobalReplyToken>,
+}
+
+impl GlobalRequest {
+    /// The request name, such as `tcpip-forward` or `keepalive@openssh.com`.
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    pub fn want_reply(&self) -> bool {
+        self.want_reply
+    }
+
+    /// The request-specific data, as sent.
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// The token to answer with, when the peer wants a reply.
+    pub fn reply(&self) -> Option<GlobalReplyToken> {
+        self.reply
+    }
 }
 
 /// An `SSH_MSG_CHANNEL_OPEN_FAILURE` reason code (RFC 4254 §5.1).
@@ -192,7 +229,14 @@ pub(crate) struct Channels {
     next_id: u32,
     next_seq: u64,
     open: BTreeMap<u32, Channel>,
+    /// Received global requests awaiting a reply, in arrival order, with the reply once given.
+    global_replies: VecDeque<(u64, Option<GlobalReply>)>,
+    /// Sent global requests that asked for a reply and have not had one.
+    global_awaiting: usize,
 }
+
+/// A global reply the consumer has given: success and the data after the message number.
+type GlobalReply = (bool, Vec<u8>);
 
 /// Smallest and largest maximum packet a peer may announce, as x/crypto/ssh accepts.
 const PEER_MAX_PACKET: core::ops::RangeInclusive<u32> = 9..=1 << 31;
@@ -205,6 +249,8 @@ impl Channels {
             next_id: 0,
             next_seq: 0,
             open: BTreeMap::new(),
+            global_replies: VecDeque::new(),
+            global_awaiting: 0,
         }
     }
 
@@ -228,6 +274,31 @@ impl Channels {
     pub(crate) fn handle(&mut self, message: Message) -> Vec<Step> {
         let mut steps = Vec::new();
         match message {
+            Message::GlobalRequest(r) => {
+                let seq = self.next_seq;
+                self.next_seq += 1;
+                let reply = r.want_reply.then(|| {
+                    self.global_replies.push_back((seq, None));
+                    GlobalReplyToken { seq }
+                });
+                steps.push(Step::Emit(Action::GlobalRequest(GlobalRequest {
+                    kind: r.kind,
+                    want_reply: r.want_reply,
+                    data: r.data,
+                    reply,
+                })));
+            }
+            m @ (Message::RequestSuccess(_) | Message::RequestFailure(_)) => {
+                let (ok, data) = match m {
+                    Message::RequestSuccess(s) => (true, s.data),
+                    Message::RequestFailure(f) => (false, f.data),
+                    _ => unreachable!(),
+                };
+                if self.global_awaiting > 0 {
+                    self.global_awaiting -= 1;
+                    steps.push(Step::Emit(Action::GlobalRequestReply { ok, data }));
+                }
+            }
             Message::ChannelOpen(o) => {
                 if !PEER_MAX_PACKET.contains(&o.max_packet) {
                     steps.push(Step::Send(Message::ChannelOpenFailure(
@@ -506,6 +577,50 @@ impl Channels {
                 Message::ChannelSuccess(ChannelSuccess::new(c.peer_id))
             } else {
                 Message::ChannelFailure(ChannelFailure::new(c.peer_id))
+            }));
+        }
+        steps
+    }
+
+    /// Sends a global request at once; a reply, when asked for, is counted as awaited.
+    pub(crate) fn global_request(
+        &mut self,
+        kind: &str,
+        want_reply: bool,
+        data: Vec<u8>,
+    ) -> Vec<Step> {
+        if want_reply {
+            self.global_awaiting += 1;
+        }
+        vec![Step::Send(Message::GlobalRequest(WireGlobalRequest::new(
+            kind.to_owned(),
+            want_reply,
+            data,
+        )))]
+    }
+
+    pub(crate) fn global_reply(
+        &mut self,
+        token: GlobalReplyToken,
+        ok: bool,
+        data: Vec<u8>,
+    ) -> Vec<Step> {
+        if let Some(entry) = self
+            .global_replies
+            .iter_mut()
+            .find(|(seq, _)| *seq == token.seq)
+        {
+            entry.1.get_or_insert((ok, data));
+        }
+        let mut steps = Vec::new();
+        while let Some((_, Some(_))) = self.global_replies.front() {
+            let Some((_, Some((ok, data)))) = self.global_replies.pop_front() else {
+                unreachable!()
+            };
+            steps.push(Step::Send(if ok {
+                Message::RequestSuccess(RequestSuccess::new(data))
+            } else {
+                Message::RequestFailure(RequestFailure::new(data))
             }));
         }
         steps

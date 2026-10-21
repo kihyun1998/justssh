@@ -1,5 +1,6 @@
 //! A server that answers `exec` with fixed output built from opaque requests only: stdout
-//! `out:<command>`, stderr `err:<command>` and exit status 7. Any password is accepted.
+//! `out:<command>`, stderr `err:<command>` and exit status 7. Any password is accepted; global
+//! requests are refused.
 //!
 //! `cargo run -p justssh-tokio --example exec_server -- 127.0.0.1:2222`, then
 //! `ssh -p 2222 -o StrictHostKeyChecking=no user@127.0.0.1 hello`.
@@ -65,6 +66,11 @@ pub async fn serve_connection(stream: TcpStream) -> std::io::Result<()> {
                         .request(channel, "exit-status", false, status)
                         .await?;
                     session.close(channel).await?;
+                }
+            }
+            Action::GlobalRequest(request) => {
+                if let Some(token) = request.reply() {
+                    session.reply_global(token, false, Vec::new()).await?;
                 }
             }
             Action::Closed(_) => break,

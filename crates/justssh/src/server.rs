@@ -1,7 +1,9 @@
 //! The server side of a connection.
 
 use crate::config::ServerConfig;
-use crate::connection::{ChannelId, ChannelInfo, OpenFailureReason, OutKind, ReplyToken};
+use crate::connection::{
+    ChannelId, ChannelInfo, GlobalReplyToken, OpenFailureReason, OutKind, ReplyToken,
+};
 use crate::event::{Action, DisconnectReason, Event, Phase};
 use crate::handshake::Handshake;
 use crate::transport::{Role, Transport};
@@ -46,6 +48,24 @@ impl Server {
     /// The exchange hash of the first key exchange, once it has finished.
     pub fn session_id(&self) -> Option<&[u8]> {
         self.transport.session_id()
+    }
+
+    /// Sends a global request, opaque. A reply, when asked for, arrives as
+    /// [`Action::GlobalRequestReply`].
+    pub fn global_request(&mut self, kind: &str, want_reply: bool, data: Vec<u8>) -> Vec<Action> {
+        self.transport
+            .channels(|c| c.global_request(kind, want_reply, data))
+    }
+
+    /// Answers a global request with `data` after the message number. Replies leave in the
+    /// order the requests arrived, whatever order they are given in.
+    pub fn reply_global_request(
+        &mut self,
+        token: GlobalReplyToken,
+        ok: bool,
+        data: Vec<u8>,
+    ) -> Vec<Action> {
+        self.transport.channels(|c| c.global_reply(token, ok, data))
     }
 
     /// Accepts the peer's channel open; `data` is the channel-type-specific part of the

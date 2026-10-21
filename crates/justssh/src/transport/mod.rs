@@ -11,7 +11,7 @@ mod version;
 use ed25519_dalek::{Signature, VerifyingKey};
 use justssh_wire::{
     Disconnect, ExtInfo, KexEcdhInit, KexEcdhReply, KexInit, Message, NewKeys, Pong, Reader,
-    ServiceAccept, ServiceRequest, UserauthFailure, UserauthSuccess, number,
+    ServiceAccept, ServiceRequest, Unimplemented, UserauthFailure, UserauthSuccess, number,
 };
 use x25519_dalek::{EphemeralSecret, PublicKey};
 use zeroize::Zeroizing;
@@ -351,7 +351,7 @@ impl Transport {
             self.in_seq = seq.wrapping_add(1);
             let first = self.packets_received == 0;
             self.packets_received += 1;
-            self.dispatch(&opened.payload, first);
+            self.dispatch(&opened.payload, seq, first);
         }
     }
 
@@ -397,7 +397,7 @@ impl Transport {
             .is_some_and(|a| a.strict_kex)
     }
 
-    fn dispatch(&mut self, payload: &[u8], first: bool) {
+    fn dispatch(&mut self, payload: &[u8], seq: u32, first: bool) {
         if self.skip_next {
             self.skip_next = false;
             return;
@@ -412,6 +412,9 @@ impl Transport {
         match allowed::verdict(self.role, self.stage, n, strict_initial) {
             Verdict::Accept => {}
             Verdict::Ignore => return,
+            Verdict::Unimplemented => {
+                return self.send(&Message::Unimplemented(Unimplemented::new(seq)));
+            }
             Verdict::Disconnect => {
                 return self.fail(
                     DisconnectReason::PROTOCOL_ERROR,
@@ -437,7 +440,10 @@ impl Transport {
             }
             Message::Ping(p) => self.send(&Message::Pong(Pong::new(p.data))),
             Message::Pong(_) => {}
-            m @ (Message::ChannelOpen(_)
+            m @ (Message::GlobalRequest(_)
+            | Message::RequestSuccess(_)
+            | Message::RequestFailure(_)
+            | Message::ChannelOpen(_)
             | Message::ChannelOpenConfirmation(_)
             | Message::ChannelOpenFailure(_)
             | Message::ChannelWindowAdjust(_)
