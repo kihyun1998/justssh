@@ -1,5 +1,6 @@
-//! Client private keys for `publickey` authentication: ed25519, ECDSA over NIST P-256/384/521 and
-//! RSA, each optionally with an OpenSSH certificate (`PROTOCOL.certkeys`).
+//! Private keys for `publickey` authentication and host keys: ed25519, ECDSA over NIST
+//! P-256/384/521 and RSA, each optionally with an OpenSSH certificate (`PROTOCOL.certkeys`); and
+//! the verification of a signature by such a public key.
 
 use core::fmt;
 
@@ -9,6 +10,10 @@ use zeroize::Zeroizing;
 
 /// The smallest RSA modulus taken, in bits, as OpenSSH's `SSH_RSA_MINIMUM_MODULUS_SIZE`.
 const MIN_RSA_BITS: usize = 1024;
+/// The largest RSA modulus and public exponent verified against, in bits, as x/crypto/ssh's
+/// `parseRSA`.
+const MAX_RSA_BITS: usize = 16384;
+const MAX_RSA_EXPONENT_BITS: usize = 24;
 
 /// A NIST curve for an ECDSA key.
 #[non_exhaustive]
@@ -47,6 +52,8 @@ pub enum KeyError {
     MalformedCertificate,
     /// The certificate certifies another key.
     CertificateMismatch,
+    /// No algorithm was named, or one named is not an algorithm the key signs under.
+    UnsupportedAlgorithm,
 }
 
 impl fmt::Display for KeyError {
@@ -55,6 +62,7 @@ impl fmt::Display for KeyError {
             KeyError::InvalidKey => "invalid private key",
             KeyError::MalformedCertificate => "malformed certificate",
             KeyError::CertificateMismatch => "certificate is for another key",
+            KeyError::UnsupportedAlgorithm => "algorithm the key does not sign under",
         })
     }
 }
@@ -147,6 +155,12 @@ impl PrivateKey {
         }
         self.certificate = Some(blob);
         Ok(self)
+    }
+
+    /// The key without its certificate.
+    pub(crate) fn without_certificate(mut self) -> Self {
+        self.certificate = None;
+        self
     }
 
     /// The certificate the key is used under, if any.
@@ -308,6 +322,168 @@ impl fmt::Debug for PrivateKey {
             .field("format", &self.format())
             .finish_non_exhaustive()
     }
+}
+
+/// Whether `signature`, a signature blob, is a valid signature under public key algorithm
+/// `algorithm` over `data` by the key whose public key blob is `key`. The blob's key type must be
+/// one `algorithm` signs with.
+pub(crate) fn verify(key: &[u8], algorithm: &str, signature: &[u8], data: &[u8]) -> bool {
+    let mut sig = Reader::new(signature);
+    let parsed = (|| {
+        let name = sig.utf8().ok()?;
+        let body = sig.string().ok()?;
+        sig.finish().ok()?;
+        Some((name, body))
+    })();
+    let Some((name, body)) = parsed else {
+        return false;
+    };
+    if name != algorithm {
+        return false;
+    }
+    let mut r = Reader::new(key);
+    let Ok(key_type) = r.utf8() else {
+        return false;
+    };
+    match (key_type, algorithm) {
+        ("ssh-ed25519", "ssh-ed25519") => verify_ed25519(r, body, data),
+        ("ecdsa-sha2-nistp256", "ecdsa-sha2-nistp256") => {
+            let Some((point, r, s)) = ecdsa_parts(r, EcdsaCurve::P256, body, 32) else {
+                return false;
+            };
+            use p256::ecdsa::signature::Verifier;
+            let (Ok(k), Ok(sig)) = (
+                p256::ecdsa::VerifyingKey::from_sec1_bytes(point),
+                p256::ecdsa::Signature::from_slice(&[r, s].concat()),
+            ) else {
+                return false;
+            };
+            k.verify(data, &sig).is_ok()
+        }
+        ("ecdsa-sha2-nistp384", "ecdsa-sha2-nistp384") => {
+            let Some((point, r, s)) = ecdsa_parts(r, EcdsaCurve::P384, body, 48) else {
+                return false;
+            };
+            use p384::ecdsa::signature::Verifier;
+            let (Ok(k), Ok(sig)) = (
+                p384::ecdsa::VerifyingKey::from_sec1_bytes(point),
+                p384::ecdsa::Signature::from_slice(&[r, s].concat()),
+            ) else {
+                return false;
+            };
+            k.verify(data, &sig).is_ok()
+        }
+        ("ecdsa-sha2-nistp521", "ecdsa-sha2-nistp521") => {
+            let Some((point, r, s)) = ecdsa_parts(r, EcdsaCurve::P521, body, 66) else {
+                return false;
+            };
+            use p521::ecdsa::signature::Verifier;
+            let (Ok(k), Ok(sig)) = (
+                p521::ecdsa::VerifyingKey::from_sec1_bytes(point),
+                p521::ecdsa::Signature::from_slice(&[r, s].concat()),
+            ) else {
+                return false;
+            };
+            k.verify(data, &sig).is_ok()
+        }
+        ("ssh-rsa", "ssh-rsa" | "rsa-sha2-256" | "rsa-sha2-512") => {
+            verify_rsa(r, algorithm, body, data)
+        }
+        _ => false,
+    }
+}
+
+fn verify_ed25519(mut r: Reader<'_>, body: &[u8], data: &[u8]) -> bool {
+    let parsed = (|| {
+        let key: [u8; 32] = r.string().ok()?.try_into().ok()?;
+        r.finish().ok()?;
+        let sig: [u8; 64] = body.try_into().ok()?;
+        Some((key, sig))
+    })();
+    let Some((key, sig)) = parsed else {
+        return false;
+    };
+    let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&key) else {
+        return false;
+    };
+    key.verify_strict(data, &ed25519_dalek::Signature::from_bytes(&sig))
+        .is_ok()
+}
+
+/// An ECDSA key blob's point after its type, checked to name `curve`, and the signature's `r`
+/// and `s` as `size`-byte big-endian integers.
+fn ecdsa_parts<'a>(
+    mut r: Reader<'a>,
+    curve: EcdsaCurve,
+    body: &[u8],
+    size: usize,
+) -> Option<(&'a [u8], Vec<u8>, Vec<u8>)> {
+    if r.utf8().ok()? != curve.name() {
+        return None;
+    }
+    let point = r.string().ok()?;
+    r.finish().ok()?;
+    let mut sig = Reader::new(body);
+    let rr = fixed(positive_mpint(&mut sig)?, size)?;
+    let ss = fixed(positive_mpint(&mut sig)?, size)?;
+    sig.finish().ok()?;
+    Some((point, rr, ss))
+}
+
+fn verify_rsa(mut r: Reader<'_>, algorithm: &str, body: &[u8], data: &[u8]) -> bool {
+    use rsa::signature::Verifier;
+    let parsed = (|| {
+        let e = positive_mpint(&mut r)?;
+        let n = positive_mpint(&mut r)?;
+        r.finish().ok()?;
+        Some((e, n))
+    })();
+    let Some((e, n)) = parsed else {
+        return false;
+    };
+    let (e, n) = (
+        rsa::BigUint::from_bytes_be(e),
+        rsa::BigUint::from_bytes_be(n),
+    );
+    if e.bits() > MAX_RSA_EXPONENT_BITS || n.bits() < MIN_RSA_BITS {
+        return false;
+    }
+    let Ok(key) = rsa::RsaPublicKey::new_with_max_size(n, e, MAX_RSA_BITS) else {
+        return false;
+    };
+    let Some(padded) = fixed(body, rsa::traits::PublicKeyParts::size(&key)) else {
+        return false;
+    };
+    let Ok(sig) = rsa::pkcs1v15::Signature::try_from(padded.as_slice()) else {
+        return false;
+    };
+    match algorithm {
+        "rsa-sha2-256" => rsa::pkcs1v15::VerifyingKey::<rsa_sha2::Sha256>::new(key)
+            .verify(data, &sig)
+            .is_ok(),
+        "rsa-sha2-512" => rsa::pkcs1v15::VerifyingKey::<rsa_sha2::Sha512>::new(key)
+            .verify(data, &sig)
+            .is_ok(),
+        _ => rsa::pkcs1v15::VerifyingKey::<rsa_sha1::Sha1>::new(key)
+            .verify(data, &sig)
+            .is_ok(),
+    }
+}
+
+/// A non-negative `mpint`'s big-endian magnitude, leading zero bytes removed.
+fn positive_mpint<'a>(r: &mut Reader<'a>) -> Option<&'a [u8]> {
+    let v = r.string().ok()?;
+    if v.first().is_some_and(|&b| b & 0x80 != 0) {
+        return None;
+    }
+    Some(&v[v.iter().position(|&b| b != 0).unwrap_or(v.len())..])
+}
+
+/// `magnitude` left-padded to `size` bytes, or `None` if it is longer.
+fn fixed(magnitude: &[u8], size: usize) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; size.checked_sub(magnitude.len())?];
+    out.extend_from_slice(magnitude);
+    Some(out)
 }
 
 /// The certificate type of key type `key_type`.

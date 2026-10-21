@@ -3,10 +3,10 @@
 use core::fmt;
 use core::num::NonZeroU32;
 
-use ed25519_dalek::Signer;
-use justssh_wire::Writer;
 use rand_core::{CryptoRng, UnwrapErr};
 use zeroize::Zeroizing;
+
+use crate::key::{KeyError, PrivateKey};
 
 pub(crate) type BoxRng = Box<dyn CryptoRng + Send>;
 
@@ -14,53 +14,74 @@ fn system_rng() -> BoxRng {
     Box::new(UnwrapErr(getrandom::SysRng))
 }
 
-/// A server host key.
+/// A server host key and the public key algorithms it is offered under.
 #[derive(Clone)]
 pub struct HostKey {
-    key: ed25519_dalek::SigningKey,
+    key: PrivateKey,
+    algorithms: Vec<&'static str>,
 }
 
 impl HostKey {
     /// An `ssh-ed25519` host key from its 32-byte secret seed.
     pub fn ed25519_from_seed(seed: Zeroizing<[u8; 32]>) -> Self {
-        HostKey {
-            key: ed25519_dalek::SigningKey::from_bytes(&seed),
+        HostKey::new(PrivateKey::ed25519(seed))
+    }
+
+    /// A host key offered under every algorithm `key` signs under, in its order. A certificate
+    /// on `key` is not used: the host key is the plain key.
+    pub fn new(key: PrivateKey) -> Self {
+        let key = key.without_certificate();
+        let algorithms = key.algorithms().to_vec();
+        HostKey { key, algorithms }
+    }
+
+    /// The key offered only under `algorithms`, still in the key's own order, as x/crypto/ssh's
+    /// `NewSignerWithAlgorithms`. A key already restricted is narrowed further.
+    ///
+    /// # Errors
+    /// [`KeyError::UnsupportedAlgorithm`] if `algorithms` is empty or names an algorithm the key
+    /// is not offered under.
+    pub fn with_algorithms(mut self, algorithms: &[&str]) -> Result<Self, KeyError> {
+        if algorithms.is_empty() || algorithms.iter().any(|a| !self.algorithms.contains(a)) {
+            return Err(KeyError::UnsupportedAlgorithm);
         }
+        self.algorithms.retain(|a| algorithms.contains(a));
+        Ok(self)
     }
 
-    pub(crate) fn algorithm(&self) -> &'static str {
-        "ssh-ed25519"
+    /// The public key algorithms the key is offered under, in order.
+    pub fn algorithms(&self) -> &[&'static str] {
+        &self.algorithms
     }
 
-    /// The public key blob `K_S` (RFC 8709 §4).
+    /// The key's public key format, such as `ssh-rsa`.
+    pub(crate) fn format(&self) -> &'static str {
+        self.key.format()
+    }
+
+    /// The public key blob `K_S`.
     pub(crate) fn public_blob(&self) -> Vec<u8> {
-        let mut w = Writer::new();
-        w.string(self.algorithm().as_bytes())
-            .string(&self.key.verifying_key().to_bytes());
-        w.into_bytes()
+        self.key.plain_public_blob()
     }
 
-    /// The signature blob over `data` (RFC 8709 §6).
-    pub(crate) fn sign(&self, data: &[u8]) -> Vec<u8> {
-        let sig = self.key.sign(data);
-        let mut w = Writer::new();
-        w.string(self.algorithm().as_bytes())
-            .string(&sig.to_bytes());
-        w.into_bytes()
+    /// The signature blob over `data` under `algorithm`, one of [`algorithms`](Self::algorithms).
+    pub(crate) fn sign(&self, algorithm: &str, data: &[u8], rng: &mut dyn CryptoRng) -> Vec<u8> {
+        self.key.sign(algorithm, data, rng)
     }
 }
 
 impl fmt::Debug for HostKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostKey")
-            .field("algorithm", &self.algorithm())
+            .field("format", &self.format())
+            .field("algorithms", &self.algorithms)
             .finish_non_exhaustive()
     }
 }
 
 /// How a [`Server`](crate::Server) runs.
 pub struct ServerConfig {
-    pub(crate) host_key: HostKey,
+    pub(crate) host_keys: Vec<HostKey>,
     pub(crate) preference: Option<crate::transport::Preference>,
     pub(crate) send_ext_info: bool,
     pub(crate) rng: BoxRng,
@@ -79,10 +100,11 @@ pub(crate) const DEFAULT_CHANNEL_MAX_PACKET: u32 = 1 << 15;
 const MAX_CHANNEL_MAX_PACKET: u32 = 256 * 1024 - 64;
 
 impl ServerConfig {
-    /// A builder for a server presenting `host_key`.
+    /// A builder for a server presenting `host_key`, and any added with
+    /// [`host_key`](ServerConfigBuilder::host_key).
     pub fn builder(host_key: HostKey) -> ServerConfigBuilder {
         ServerConfigBuilder {
-            host_key,
+            host_keys: vec![host_key],
             preference: None,
             send_ext_info: true,
             rng: None,
@@ -96,7 +118,7 @@ impl ServerConfig {
 
 /// Builds a [`ServerConfig`].
 pub struct ServerConfigBuilder {
-    host_key: HostKey,
+    host_keys: Vec<HostKey>,
     preference: Option<crate::transport::Preference>,
     send_ext_info: bool,
     rng: Option<BoxRng>,
@@ -107,6 +129,20 @@ pub struct ServerConfigBuilder {
 }
 
 impl ServerConfigBuilder {
+    /// Adds `key`, offered after the keys already added; it replaces an added key of the same
+    /// format, as x/crypto/ssh's `AddHostKey`.
+    pub fn host_key(mut self, key: HostKey) -> Self {
+        match self
+            .host_keys
+            .iter_mut()
+            .find(|k| k.format() == key.format())
+        {
+            Some(k) => *k = key,
+            None => self.host_keys.push(key),
+        }
+        self
+    }
+
     /// The window each accepted channel starts with. Defaults to 2 MiB, as x/crypto/ssh.
     ///
     /// # Panics
@@ -187,7 +223,7 @@ impl ServerConfigBuilder {
 
     pub fn build(self) -> ServerConfig {
         ServerConfig {
-            host_key: self.host_key,
+            host_keys: self.host_keys,
             preference: self.preference,
             send_ext_info: self.send_ext_info,
             rng: self.rng.unwrap_or_else(system_rng),
@@ -247,6 +283,15 @@ impl ClientConfigBuilder {
         self.preference
             .get_or_insert_with(Default::default)
             .set_server_to_client(ciphers, macs);
+        self
+    }
+
+    /// Offers only `algorithms` as host key algorithms, in that order. For tests only.
+    #[cfg(feature = "test-support")]
+    pub fn host_key_algorithms(mut self, algorithms: &[&str]) -> Self {
+        self.preference
+            .get_or_insert_with(Default::default)
+            .set_host_keys(algorithms);
         self
     }
 

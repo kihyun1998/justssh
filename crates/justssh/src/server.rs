@@ -16,7 +16,7 @@ impl Server {
         let mut server = Server {
             transport: Transport::new(
                 Role::Server,
-                Some(config.host_key),
+                config.host_keys,
                 None,
                 config.rng,
                 config.version,

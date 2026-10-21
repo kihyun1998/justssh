@@ -20,7 +20,16 @@ pub(crate) const KEX: &[&str] = &[
     "diffie-hellman-group14-sha256",
     "diffie-hellman-group14-sha1",
 ];
-pub(crate) const HOST_KEY: &[&str] = &["ssh-ed25519"];
+/// x/crypto/ssh v0.55's `defaultHostKeyAlgos` without the certificate and DSA algorithms.
+pub(crate) const HOST_KEY: &[&str] = &[
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "rsa-sha2-256",
+    "rsa-sha2-512",
+    "ssh-rsa",
+    "ssh-ed25519",
+];
 /// x/crypto/ssh v0.55's `defaultCiphers`.
 pub(crate) const CIPHER: &[&str] = &[
     "aes128-gcm@openssh.com",

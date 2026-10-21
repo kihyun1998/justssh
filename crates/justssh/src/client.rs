@@ -16,7 +16,7 @@ impl Client {
     pub fn new(config: ClientConfig) -> Self {
         let mut transport = Transport::new(
             Role::Client,
-            None,
+            Vec::new(),
             Some(config.user),
             config.rng,
             config.version,
