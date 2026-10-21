@@ -34,6 +34,20 @@ On `SSH_MSG_CHANNEL_CLOSE` the core sends its own close if it has not already, d
 
 Replies to the peer's requests leave in arrival order, so a token the consumer never answers holds back every later reply on its channel. Every request with `want_reply` must be answered.
 
+A request this side sends with `want_reply` returns a `RequestToken`, and its reply comes back with it in `Action::ChannelRequestReply`; the peer answers a channel's requests in the order they were sent (RFC 4254 §5.4), which is how the token is found. When a channel closes, is aborted or is refused before the peer replies, each of its tokens still owed a reply comes back as a failed `ChannelRequestReply`, ahead of the `ChannelClosed` or `ChannelOpenFailed`: x/crypto/ssh's `SendRequest` returns `io.EOF` there and acwbroker answers the downstream request false (`relay.go`), so a relay gets the same answer without a table of its own. A request queued behind this side's close fails when the close goes out. A failure the peer sent and one this side made are not told apart. The maintainer chose the failed reply over a dedicated action and over documenting the end alone on #8. x/crypto/ssh pairs them by blocking `SendRequest` until the reply; a token is that pairing without the wait, so a relay can map it to the downstream request it forwards. The maintainer chose the returned token over a tag the consumer supplies on #8.
+
+Every token and every `ChannelId` carries the connection it came from; a token of another connection answers nothing, the way a token answered twice does, and a command given another connection's channel id does nothing. Without that, a relay that passed a downstream channel id to the upstream connection would act on whichever upstream channel had the same number. The maintainer extended the rule to channel ids on #8. A broker holds a server connection and a client connection side by side, whose sequence numbers both start at 0; x/crypto/ssh's `Request` holds its own channel and cannot be mixed up (`channel.go` `type Request`).
+
+## Channels this side opens
+
+`open_channel` returns the channel id at once and sends `SSH_MSG_CHANNEL_OPEN`; the peer's answer arrives as `Action::ChannelOpened`, with the confirmation's type-specific data, or `Action::ChannelOpenFailed`, with its reason and description, after which the id is free. Commands for the channel wait in its queue, in order, and go out once it is confirmed; a refusal drops them. So a consumer whose downstream goes away while the upstream channel is still opening can `channel_abort` it, and the close goes out right after the confirmation. x/crypto/ssh's `OpenChannel` blocks until the answer, so nothing can be sent or abandoned before it. A confirmation announcing a maximum packet outside 9..2^31 ends the connection (`channel.go` `channelOpenConfirmMsg`), and a confirmation or failure for a channel this side is not opening ends it as an unknown channel. The description is read as lossy UTF-8.
+
+OpenSSH 8.7p1 and 9.6p1 both refuse a channel type they do not know with reason 2 (`CONNECT_FAILED`) and "open failed" (measured on #8 by `crates/justssh-tokio/tests/sshd.rs`).
+
+## Either role through one Session
+
+`justssh::Endpoint` is implemented by `Server` and `Client` with their inherent methods of the same names, written once (`connection_methods!` in `endpoint.rs`), and `justssh_tokio::Session<IO, E>` runs either. The maintainer chose this over a separate client session and over moving the methods to a shared type on #8.
+
 ## Channel ids are reused after wrapping
 
 A new channel takes the next id not in use, so ids reach 2^32 before any is reused and a live one is never overwritten.

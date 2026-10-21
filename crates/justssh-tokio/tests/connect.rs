@@ -426,3 +426,99 @@ async fn a_deadline_passing_while_reading_ends_connect_when_the_disconnect_canno
         }
     );
 }
+
+#[tokio::test]
+async fn a_client_session_and_a_server_session_carry_an_exec_both_ways() {
+    let (server_io, client_io) = tokio::io::duplex(1 << 16);
+    let server_task = tokio::spawn(async move {
+        let config =
+            ServerConfig::builder(HostKey::ed25519_from_seed(Zeroizing::new([7; 32]))).build();
+        let mut server = Server::new(config);
+        let Ok(justssh_tokio::Accepted::Authenticated { io, events, .. }) =
+            justssh_tokio::accept(server_io, &mut server, &Deadlines::new(), |_| async {
+                Some(())
+            })
+            .await
+        else {
+            panic!("not authenticated");
+        };
+        let mut session = justssh_tokio::Session::new(io, server, events);
+        let channel = match session.next().await.unwrap() {
+            Some(Action::ChannelOpenRequest(open)) => open.channel(),
+            other => panic!("{other:?}"),
+        };
+        session.accept_channel(channel, Vec::new()).await.unwrap();
+        let (kind, data, token) = match session.next().await.unwrap() {
+            Some(Action::ChannelRequest(r)) => (r.kind().to_owned(), r.data().to_vec(), r.reply()),
+            other => panic!("{other:?}"),
+        };
+        session.reply(token.unwrap(), true).await.unwrap();
+        session.data(channel, b"hello\n").await.unwrap();
+        session
+            .request(channel, "exit-status", false, vec![0, 0, 0, 0])
+            .await
+            .unwrap();
+        session.eof(channel).await.unwrap();
+        session.close(channel).await.unwrap();
+        while let Some(action) = session.next().await.unwrap() {
+            if matches!(action, Action::ChannelClosed { .. }) {
+                break;
+            }
+        }
+        (kind, data)
+    });
+
+    let mut client = Client::new(ClientConfig::builder(b"alice").build());
+    let Connected::Authenticated { io, events } = justssh_tokio::connect(
+        client_io,
+        &mut client,
+        &Deadlines::new(),
+        &[password(b"pw")],
+        &mut Handler::accepting(),
+    )
+    .await
+    .unwrap() else {
+        panic!("not authenticated");
+    };
+    let mut session = justssh_tokio::Session::new(io, client, events);
+    let channel = session
+        .open_channel("session", Vec::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        session.next().await.unwrap(),
+        Some(Action::ChannelOpened { channel: c, .. }) if c == channel
+    ));
+    let token = session
+        .request(channel, "exec", true, b"\0\0\0\x02id".to_vec())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    while let Some(action) = session.next().await.unwrap() {
+        match action {
+            Action::ChannelRequestReply { token: t, ok, .. } if Some(t) == token => {
+                seen.push(format!("reply {ok}"))
+            }
+            Action::ChannelData { data, .. } => {
+                seen.push(format!("data {}", String::from_utf8_lossy(&data)))
+            }
+            Action::ChannelRequest(r) => seen.push(r.kind().to_owned()),
+            Action::ChannelEof { .. } => seen.push("eof".into()),
+            Action::ChannelClosed { .. } => {
+                seen.push("closed".into());
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        seen,
+        ["reply true", "data hello\n", "exit-status", "eof", "closed"]
+    );
+    let (kind, data) = server_task.await.unwrap();
+    assert_eq!(
+        (kind.as_str(), data.as_slice()),
+        ("exec", &b"\0\0\0\x02id"[..])
+    );
+}

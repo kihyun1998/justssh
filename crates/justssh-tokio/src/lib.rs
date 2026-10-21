@@ -9,8 +9,8 @@ use std::io;
 use std::time::Duration;
 
 use justssh::{
-    Action, ChannelId, Closed, Event, GlobalReplyToken, OpenFailureReason, PasswordRequest, Phase,
-    ReplyToken, Server,
+    Action, ChannelId, Closed, Endpoint, Event, GlobalReplyToken, OpenFailureReason,
+    PasswordRequest, Phase, ReplyToken, RequestToken, Server,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
@@ -169,30 +169,32 @@ where
     }
 }
 
-/// An authenticated connection: the stream and its [`Server`], run through the connection
-/// protocol. [`next`](Session::next) hands over what the peer does; the other methods send.
+/// An authenticated connection: the stream and its [`Server`] or [`Client`](justssh::Client), run
+/// through the connection protocol. [`next`](Session::next) hands over what the peer does; the
+/// other methods send.
 ///
 /// Every method is cancel-safe: output not yet written stays queued and goes out on the next
 /// call. A command takes effect when it is called, so a cancelled one is not to be repeated.
-pub struct Session<IO> {
+pub struct Session<IO, E = Server> {
     io: IO,
-    server: Server,
+    endpoint: E,
     buf: Vec<u8>,
     out: Vec<u8>,
     written: usize,
     events: std::collections::VecDeque<Action>,
 }
 
-impl<IO> Session<IO>
+impl<IO, E> Session<IO, E>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
+    E: Endpoint,
 {
-    /// A session over the stream and server [`accept`] authenticated, starting with the
-    /// `events` it returned.
-    pub fn new(io: IO, server: Server, events: Vec<Action>) -> Self {
+    /// A session over the stream and endpoint that [`accept`] or [`connect`] authenticated,
+    /// starting with the `events` it returned.
+    pub fn new(io: IO, endpoint: E, events: Vec<Action>) -> Self {
         Session {
             io,
-            server,
+            endpoint,
             buf: vec![0u8; 32 * 1024],
             out: Vec::new(),
             written: 0,
@@ -200,8 +202,20 @@ where
         }
     }
 
-    pub fn server(&self) -> &Server {
-        &self.server
+    pub fn endpoint(&self) -> &E {
+        &self.endpoint
+    }
+
+    /// Opens a channel of type `kind`; the peer's answer comes from [`next`](Session::next) as
+    /// [`Action::ChannelOpened`] or [`Action::ChannelOpenFailed`].
+    pub async fn open_channel(
+        &mut self,
+        kind: &str,
+        data: Vec<u8>,
+    ) -> io::Result<Option<ChannelId>> {
+        let (channel, actions) = self.endpoint.open_channel(kind, data);
+        self.send(actions).await?;
+        Ok(channel)
     }
 
     /// The next thing the peer did — never [`Action::Write`]. [`Action::Closed`] is the last
@@ -213,20 +227,20 @@ where
             if let Some(action) = self.events.pop_front() {
                 return Ok(Some(action));
             }
-            if self.server.phase() == Phase::Closed {
+            if self.endpoint.phase() == Phase::Closed {
                 return Ok(None);
             }
             let n = self.io.read(&mut self.buf).await?;
             if n == 0 {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
-            let actions = self.server.process(Event::Received(&self.buf[..n]));
+            let actions = self.endpoint.process(Event::Received(&self.buf[..n]));
             self.absorb(actions);
         }
     }
 
     pub async fn accept_channel(&mut self, channel: ChannelId, data: Vec<u8>) -> io::Result<()> {
-        let actions = self.server.accept_channel(channel, data);
+        let actions = self.endpoint.accept_channel(channel, data);
         self.send(actions).await
     }
 
@@ -236,14 +250,14 @@ where
         reason: OpenFailureReason,
         description: &str,
     ) -> io::Result<()> {
-        let actions = self.server.reject_channel(channel, reason, description);
+        let actions = self.endpoint.reject_channel(channel, reason, description);
         self.send(actions).await
     }
 
     /// Sends `data` and returns once the peer's window has taken all of it, reading meanwhile;
     /// what the peer does in the meantime is kept for [`next`](Session::next).
     pub async fn data(&mut self, channel: ChannelId, data: &[u8]) -> io::Result<()> {
-        let actions = self.server.channel_data(channel, data);
+        let actions = self.endpoint.channel_data(channel, data);
         self.send(actions).await?;
         self.drain(channel).await
     }
@@ -255,16 +269,16 @@ where
         code: u32,
         data: &[u8],
     ) -> io::Result<()> {
-        let actions = self.server.channel_extended_data(channel, code, data);
+        let actions = self.endpoint.channel_extended_data(channel, code, data);
         self.send(actions).await?;
         self.drain(channel).await
     }
 
     /// Reads until nothing is queued for `channel`, it has closed, or the connection has.
     async fn drain(&mut self, channel: ChannelId) -> io::Result<()> {
-        while self.server.phase() != Phase::Closed
+        while self.endpoint.phase() != Phase::Closed
             && self
-                .server
+                .endpoint
                 .channel_info(channel)
                 .is_some_and(|info| info.queued() > 0)
         {
@@ -272,25 +286,25 @@ where
             if n == 0 {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
-            let actions = self.server.process(Event::Received(&self.buf[..n]));
+            let actions = self.endpoint.process(Event::Received(&self.buf[..n]));
             self.send(actions).await?;
         }
         Ok(())
     }
 
     pub async fn eof(&mut self, channel: ChannelId) -> io::Result<()> {
-        let actions = self.server.channel_eof(channel);
+        let actions = self.endpoint.channel_eof(channel);
         self.send(actions).await
     }
 
     pub async fn close(&mut self, channel: ChannelId) -> io::Result<()> {
-        let actions = self.server.channel_close(channel);
+        let actions = self.endpoint.channel_close(channel);
         self.send(actions).await
     }
 
     /// Closes `channel` now, dropping whatever is still queued for it.
     pub async fn abort(&mut self, channel: ChannelId) -> io::Result<()> {
-        let actions = self.server.channel_abort(channel);
+        let actions = self.endpoint.channel_abort(channel);
         self.send(actions).await
     }
 
@@ -301,36 +315,42 @@ where
         reason: justssh::DisconnectReason,
         description: &str,
     ) -> io::Result<()> {
-        let actions = self.server.disconnect(reason, description);
+        let actions = self.endpoint.disconnect(reason, description);
         self.send(actions).await
     }
 
+    /// Sends a channel request; when it wants a reply, the token returned comes back with it
+    /// from [`next`](Session::next) in [`Action::ChannelRequestReply`].
     pub async fn request(
         &mut self,
         channel: ChannelId,
         kind: &str,
         want_reply: bool,
         data: Vec<u8>,
-    ) -> io::Result<()> {
-        let actions = self.server.channel_request(channel, kind, want_reply, data);
-        self.send(actions).await
+    ) -> io::Result<Option<RequestToken>> {
+        let (token, actions) = self
+            .endpoint
+            .channel_request(channel, kind, want_reply, data);
+        self.send(actions).await?;
+        Ok(token)
     }
 
     pub async fn reply(&mut self, token: ReplyToken, ok: bool) -> io::Result<()> {
-        let actions = self.server.reply_channel_request(token, ok);
+        let actions = self.endpoint.reply_channel_request(token, ok);
         self.send(actions).await
     }
 
-    /// Sends a global request; a reply, when asked for, comes from [`next`](Session::next) as
-    /// [`Action::GlobalRequestReply`].
+    /// Sends a global request; when it wants a reply, the token returned comes back with it
+    /// from [`next`](Session::next) in [`Action::GlobalRequestReply`].
     pub async fn global_request(
         &mut self,
         kind: &str,
         want_reply: bool,
         data: Vec<u8>,
-    ) -> io::Result<()> {
-        let actions = self.server.global_request(kind, want_reply, data);
-        self.send(actions).await
+    ) -> io::Result<Option<RequestToken>> {
+        let (token, actions) = self.endpoint.global_request(kind, want_reply, data);
+        self.send(actions).await?;
+        Ok(token)
     }
 
     pub async fn reply_global(
@@ -339,14 +359,14 @@ where
         ok: bool,
         data: Vec<u8>,
     ) -> io::Result<()> {
-        let actions = self.server.reply_global_request(token, ok, data);
+        let actions = self.endpoint.reply_global_request(token, ok, data);
         self.send(actions).await
     }
 
     /// Reports that `bytes` received on `channel` have been taken; see
     /// [`Server::channel_consumed`].
     pub async fn consumed(&mut self, channel: ChannelId, bytes: u32) -> io::Result<()> {
-        let actions = self.server.channel_consumed(channel, bytes);
+        let actions = self.endpoint.channel_consumed(channel, bytes);
         self.send(actions).await
     }
 

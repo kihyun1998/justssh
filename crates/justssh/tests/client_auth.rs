@@ -22,27 +22,6 @@ fn at_auth() -> (Server, Client) {
     (server, client)
 }
 
-/// Delivers every write in `actions` from one side to the other and returns what it did.
-fn to_server(server: &mut Server, actions: Vec<Action>) -> Vec<Action> {
-    let mut out = Vec::new();
-    for a in actions {
-        if let Action::Write(b) = a {
-            out.extend(server.process(Event::Received(&b)));
-        }
-    }
-    out
-}
-
-fn to_client(client: &mut Client, actions: Vec<Action>) -> Vec<Action> {
-    let mut out = Vec::new();
-    for a in actions {
-        if let Action::Write(b) = a {
-            out.extend(client.process(Event::Received(&b)));
-        }
-    }
-    out
-}
-
 /// What the client did with `payloads` sent raw by the server.
 fn raw_to_client(server: &mut Server, client: &mut Client, payloads: &[Vec<u8>]) -> Vec<Action> {
     let mut out = Vec::new();

@@ -180,6 +180,8 @@ pub struct ClientConfig {
     pub(crate) user: Vec<u8>,
     pub(crate) rng: BoxRng,
     pub(crate) version: String,
+    pub(crate) channel_window: u32,
+    pub(crate) channel_max_packet: u32,
 }
 
 impl ClientConfig {
@@ -188,6 +190,8 @@ impl ClientConfig {
         ClientConfigBuilder {
             user: user.to_vec(),
             rng: None,
+            channel_window: DEFAULT_CHANNEL_WINDOW,
+            channel_max_packet: DEFAULT_CHANNEL_MAX_PACKET,
         }
     }
 }
@@ -196,9 +200,35 @@ impl ClientConfig {
 pub struct ClientConfigBuilder {
     user: Vec<u8>,
     rng: Option<BoxRng>,
+    channel_window: u32,
+    channel_max_packet: u32,
 }
 
 impl ClientConfigBuilder {
+    /// The window each channel starts with. Defaults to 2 MiB, as x/crypto/ssh.
+    ///
+    /// # Panics
+    /// If `bytes` is 0.
+    pub fn channel_window(mut self, bytes: u32) -> Self {
+        assert!(bytes > 0, "channel window must not be 0");
+        self.channel_window = bytes;
+        self
+    }
+
+    /// The most data the peer may put in one channel packet. Defaults to 32 KiB, as
+    /// x/crypto/ssh.
+    ///
+    /// # Panics
+    /// If `bytes` is 0 or too large for the transport's largest packet.
+    pub fn channel_max_packet(mut self, bytes: u32) -> Self {
+        assert!(
+            (1..=MAX_CHANNEL_MAX_PACKET).contains(&bytes),
+            "channel maximum packet {bytes} out of range"
+        );
+        self.channel_max_packet = bytes;
+        self
+    }
+
     /// The random number generator for cookies, padding and ephemeral keys. Defaults to the
     /// operating system's generator.
     pub fn rng(mut self, rng: impl CryptoRng + Send + 'static) -> Self {
@@ -210,6 +240,8 @@ impl ClientConfigBuilder {
         ClientConfig {
             user: self.user,
             rng: self.rng.unwrap_or_else(system_rng),
+            channel_window: self.channel_window,
+            channel_max_packet: self.channel_max_packet,
             version: "SSH-2.0-justssh".to_owned(),
         }
     }

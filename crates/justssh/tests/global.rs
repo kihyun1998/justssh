@@ -108,10 +108,9 @@ fn a_token_answered_twice_sends_one_reply() {
 #[test]
 fn a_request_this_side_sends_gets_its_reply_with_the_payload() {
     let (mut server, mut client) = connected();
-    let sent = replies(
-        &mut client,
-        &server.global_request("hostkeys-prove-00@openssh.com", true, b"keys".to_vec()),
-    );
+    let (token, actions) =
+        server.global_request("hostkeys-prove-00@openssh.com", true, b"keys".to_vec());
+    let sent = replies(&mut client, &actions);
     assert_eq!(
         sent,
         [global("hostkeys-prove-00@openssh.com", true, b"keys")]
@@ -126,7 +125,8 @@ fn a_request_this_side_sends_gets_its_reply_with_the_payload() {
     assert!(
         matches!(
             &actions[..],
-            [Action::GlobalRequestReply { ok: false, data }] if data == b"why"
+            [Action::GlobalRequestReply { token: t, ok: false, data }]
+                if data == b"why" && Some(*t) == token
         ),
         "{actions:?}"
     );

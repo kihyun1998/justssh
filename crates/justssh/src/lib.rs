@@ -3,6 +3,7 @@
 mod client;
 mod config;
 mod connection;
+mod endpoint;
 mod event;
 mod handshake;
 mod server;
@@ -12,8 +13,9 @@ pub use client::Client;
 pub use config::{ClientConfig, ClientConfigBuilder, HostKey, ServerConfig, ServerConfigBuilder};
 pub use connection::{
     ChannelId, ChannelInfo, ChannelOpenRequest, ChannelRequest, GlobalReplyToken, GlobalRequest,
-    OpenFailureReason, ReplyToken,
+    OpenFailureReason, ReplyToken, RequestToken,
 };
+pub use endpoint::Endpoint;
 pub use event::{
     Action, Closed, DisconnectReason, Error, Event, InfoRequest, PasswordRequest, Phase, Prompt,
 };

@@ -3,9 +3,10 @@
 //! windows, reply order and the per-channel order of what the consumer sends.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use justssh_wire::{
-    ChannelClose, ChannelData, ChannelEof, ChannelExtendedData, ChannelFailure,
+    ChannelClose, ChannelData, ChannelEof, ChannelExtendedData, ChannelFailure, ChannelOpen,
     ChannelOpenConfirmation, ChannelOpenFailure, ChannelRequest as WireRequest, ChannelSuccess,
     ChannelWindowAdjust, GlobalRequest as WireGlobalRequest, Message, RequestFailure,
     RequestSuccess,
@@ -13,20 +14,28 @@ use justssh_wire::{
 
 use crate::event::{Action, DisconnectReason, Error};
 
-/// A channel, as this side numbers it.
+/// A channel, as this side numbers it on one connection; commands given the id of a channel on
+/// another connection do nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ChannelId(u32);
+pub struct ChannelId {
+    connection: u64,
+    id: u32,
+}
 
 impl ChannelId {
     /// The number this side uses for the channel on the wire.
     pub fn get(self) -> u32 {
-        self.0
+        self.id
     }
 }
+
+/// The connection a token belongs to; tokens of another connection answer nothing.
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(0);
 
 /// Identifies a received channel request that asked for a reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReplyToken {
+    connection: u64,
     channel: u32,
     seq: u64,
 }
@@ -34,6 +43,15 @@ pub struct ReplyToken {
 /// Identifies a received global request that asked for a reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlobalReplyToken {
+    connection: u64,
+    seq: u64,
+}
+
+/// Identifies a channel or global request this side sent with `want_reply`; its reply carries
+/// the same token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestToken {
+    connection: u64,
     seq: u64,
 }
 
@@ -202,14 +220,19 @@ enum Out {
         sent: usize,
     },
     Eof,
-    Request(String, bool, Vec<u8>),
+    /// A request, with the sequence number of its token when it wants a reply.
+    Request(String, Option<u64>, Vec<u8>),
     Close,
 }
 
 struct Channel {
+    this: ChannelId,
     peer_id: u32,
     kind: String,
+    /// Open in both directions: accepted by the consumer, or confirmed by the peer.
     accepted: bool,
+    /// Opened by this side, awaiting the peer's confirmation.
+    opening: bool,
     peer_window: u32,
     peer_max_packet: u32,
     window: u32,
@@ -217,13 +240,14 @@ struct Channel {
     queue: VecDeque<Out>,
     /// Received requests awaiting a reply, in arrival order, with the reply once given.
     replies: VecDeque<(u64, Option<bool>)>,
-    /// Sent requests that asked for a reply and have not had one.
-    awaiting: usize,
+    /// Sent requests that asked for a reply and have not had one, as token sequence numbers.
+    awaiting: VecDeque<u64>,
     sent_close: bool,
     got_eof: bool,
 }
 
 pub(crate) struct Channels {
+    connection: u64,
     window: u32,
     max_packet: u32,
     next_id: u32,
@@ -231,8 +255,9 @@ pub(crate) struct Channels {
     open: BTreeMap<u32, Channel>,
     /// Received global requests awaiting a reply, in arrival order, with the reply once given.
     global_replies: VecDeque<(u64, Option<GlobalReply>)>,
-    /// Sent global requests that asked for a reply and have not had one.
-    global_awaiting: usize,
+    /// Sent global requests that asked for a reply and have not had one, as token sequence
+    /// numbers.
+    global_awaiting: VecDeque<u64>,
 }
 
 /// A global reply the consumer has given: success and the data after the message number.
@@ -244,18 +269,69 @@ const PEER_MAX_PACKET: core::ops::RangeInclusive<u32> = 9..=1 << 31;
 impl Channels {
     pub(crate) fn new(window: u32, max_packet: u32) -> Self {
         Channels {
+            connection: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
             window,
             max_packet,
             next_id: 0,
             next_seq: 0,
             open: BTreeMap::new(),
             global_replies: VecDeque::new(),
-            global_awaiting: 0,
+            global_awaiting: VecDeque::new(),
         }
     }
 
+    fn seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        seq
+    }
+
+    /// The next channel id not in use.
+    fn allocate(&mut self) -> u32 {
+        let mut id = self.next_id;
+        while self.open.contains_key(&id) {
+            id = id.wrapping_add(1);
+        }
+        self.next_id = id.wrapping_add(1);
+        id
+    }
+
+    fn channel(
+        &self,
+        id: u32,
+        peer_id: u32,
+        kind: String,
+        peer_window: u32,
+        peer_max_packet: u32,
+    ) -> Channel {
+        Channel {
+            this: ChannelId {
+                connection: self.connection,
+                id,
+            },
+            peer_id,
+            kind,
+            accepted: false,
+            opening: false,
+            peer_window,
+            peer_max_packet,
+            window: self.window,
+            consumed: 0,
+            queue: VecDeque::new(),
+            replies: VecDeque::new(),
+            awaiting: VecDeque::new(),
+            sent_close: false,
+            got_eof: false,
+        }
+    }
+
+    /// The number of `id` when it belongs to this connection.
+    fn local(&self, id: ChannelId) -> Option<u32> {
+        (id.connection == self.connection).then_some(id.id)
+    }
+
     pub(crate) fn info(&self, id: ChannelId) -> Option<ChannelInfo> {
-        self.open.get(&id.0).map(|c| ChannelInfo {
+        self.open.get(&self.local(id)?).map(|c| ChannelInfo {
             kind: c.kind.clone(),
             peer_window: c.peer_window,
             peer_max_packet: c.peer_max_packet,
@@ -273,13 +349,15 @@ impl Channels {
     /// Handles a received connection-protocol message.
     pub(crate) fn handle(&mut self, message: Message) -> Vec<Step> {
         let mut steps = Vec::new();
+        let connection = self.connection;
+        let channel_id = |id| ChannelId { connection, id };
         match message {
             Message::GlobalRequest(r) => {
-                let seq = self.next_seq;
-                self.next_seq += 1;
+                let seq = self.seq();
+                let connection = self.connection;
                 let reply = r.want_reply.then(|| {
                     self.global_replies.push_back((seq, None));
-                    GlobalReplyToken { seq }
+                    GlobalReplyToken { connection, seq }
                 });
                 steps.push(Step::Emit(Action::GlobalRequest(GlobalRequest {
                     kind: r.kind,
@@ -294,9 +372,12 @@ impl Channels {
                     Message::RequestFailure(f) => (false, f.data),
                     _ => unreachable!(),
                 };
-                if self.global_awaiting > 0 {
-                    self.global_awaiting -= 1;
-                    steps.push(Step::Emit(Action::GlobalRequestReply { ok, data }));
+                if let Some(seq) = self.global_awaiting.pop_front() {
+                    let token = RequestToken {
+                        connection: self.connection,
+                        seq,
+                    };
+                    steps.push(Step::Emit(Action::GlobalRequestReply { token, ok, data }));
                 }
             }
             Message::ChannelOpen(o) => {
@@ -311,30 +392,11 @@ impl Channels {
                     )));
                     return steps;
                 }
-                let mut id = self.next_id;
-                while self.open.contains_key(&id) {
-                    id = id.wrapping_add(1);
-                }
-                self.next_id = id.wrapping_add(1);
-                self.open.insert(
-                    id,
-                    Channel {
-                        peer_id: o.sender,
-                        kind: o.kind.clone(),
-                        accepted: false,
-                        peer_window: o.window,
-                        peer_max_packet: o.max_packet,
-                        window: self.window,
-                        consumed: 0,
-                        queue: VecDeque::new(),
-                        replies: VecDeque::new(),
-                        awaiting: 0,
-                        sent_close: false,
-                        got_eof: false,
-                    },
-                );
+                let id = self.allocate();
+                let channel = self.channel(id, o.sender, o.kind.clone(), o.window, o.max_packet);
+                self.open.insert(id, channel);
                 steps.push(Step::Emit(Action::ChannelOpenRequest(ChannelOpenRequest {
-                    channel: ChannelId(id),
+                    channel: channel_id(id),
                     kind: o.kind,
                     data: o.data,
                     peer_window: o.window,
@@ -367,7 +429,7 @@ impl Channels {
                 };
                 if !c.sent_close && !c.got_eof {
                     c.got_eof = true;
-                    let channel = ChannelId(e.recipient);
+                    let channel = channel_id(e.recipient);
                     steps.push(Step::Emit(Action::ChannelEof { channel }));
                 }
             }
@@ -380,12 +442,14 @@ impl Channels {
                         c.peer_id,
                     ))));
                 }
+                fail_awaiting(c, &mut steps);
+                fail_queued(c, &mut steps);
                 self.open.remove(&m.recipient);
-                let channel = ChannelId(m.recipient);
+                let channel = channel_id(m.recipient);
                 steps.push(Step::Emit(Action::ChannelClosed { channel }));
             }
             Message::ChannelRequest(r) => {
-                let seq = self.next_seq;
+                let (seq, connection) = (self.next_seq, self.connection);
                 let Some(c) = self.accepted(r.recipient, &mut steps) else {
                     return steps;
                 };
@@ -395,13 +459,14 @@ impl Channels {
                 let reply = r.want_reply.then(|| {
                     c.replies.push_back((seq, None));
                     ReplyToken {
+                        connection,
                         channel: r.recipient,
                         seq,
                     }
                 });
                 self.next_seq += 1;
                 steps.push(Step::Emit(Action::ChannelRequest(ChannelRequest {
-                    channel: ChannelId(r.recipient),
+                    channel: channel_id(r.recipient),
                     kind: r.kind,
                     want_reply: r.want_reply,
                     data: r.data,
@@ -411,22 +476,66 @@ impl Channels {
             Message::ChannelSuccess(ChannelSuccess { recipient, .. })
             | Message::ChannelFailure(ChannelFailure { recipient, .. }) => {
                 let ok = matches!(message, Message::ChannelSuccess(_));
+                let connection = self.connection;
                 let Some(c) = self.accepted(recipient, &mut steps) else {
                     return steps;
                 };
-                if c.awaiting == 0 {
+                let Some(seq) = c.awaiting.pop_front() else {
+                    return steps;
+                };
+                let channel = channel_id(recipient);
+                let token = RequestToken { connection, seq };
+                steps.push(Step::Emit(Action::ChannelRequestReply {
+                    channel,
+                    token,
+                    ok,
+                }));
+            }
+            Message::ChannelOpenConfirmation(m) => {
+                let Some(c) = self.open.get_mut(&m.recipient).filter(|c| c.opening) else {
+                    steps.push(Step::Fail(
+                        DisconnectReason::PROTOCOL_ERROR,
+                        Error::UnknownChannel {
+                            channel: m.recipient,
+                        },
+                    ));
+                    return steps;
+                };
+                if !PEER_MAX_PACKET.contains(&m.max_packet) {
+                    steps.push(Step::Fail(
+                        DisconnectReason::PROTOCOL_ERROR,
+                        Error::InvalidChannelMaxPacket,
+                    ));
                     return steps;
                 }
-                c.awaiting -= 1;
-                let channel = ChannelId(recipient);
-                steps.push(Step::Emit(Action::ChannelRequestReply { channel, ok }));
+                c.opening = false;
+                c.accepted = true;
+                c.peer_id = m.sender;
+                c.peer_window = m.window;
+                c.peer_max_packet = m.max_packet;
+                steps.push(Step::Emit(Action::ChannelOpened {
+                    channel: channel_id(m.recipient),
+                    data: m.data,
+                }));
+                flush(c, &mut steps);
             }
-            Message::ChannelOpenConfirmation(ChannelOpenConfirmation { recipient, .. })
-            | Message::ChannelOpenFailure(ChannelOpenFailure { recipient, .. }) => {
-                steps.push(Step::Fail(
-                    DisconnectReason::PROTOCOL_ERROR,
-                    Error::UnknownChannel { channel: recipient },
-                ));
+            Message::ChannelOpenFailure(m) => {
+                let Some(c) = self.open.get_mut(&m.recipient).filter(|c| c.opening) else {
+                    steps.push(Step::Fail(
+                        DisconnectReason::PROTOCOL_ERROR,
+                        Error::UnknownChannel {
+                            channel: m.recipient,
+                        },
+                    ));
+                    return steps;
+                };
+                fail_queued(c, &mut steps);
+                self.open.remove(&m.recipient);
+                steps.push(Step::Emit(Action::ChannelOpenFailed {
+                    channel: channel_id(m.recipient),
+                    reason: OpenFailureReason(m.reason),
+                    description: m.description,
+                }));
             }
             _ => {}
         }
@@ -448,7 +557,7 @@ impl Channels {
     }
 
     fn data(&mut self, id: u32, code: Option<u32>, data: Vec<u8>, steps: &mut Vec<Step>) {
-        let max_packet = self.max_packet;
+        let (max_packet, connection) = (self.max_packet, self.connection);
         let Some(c) = self.accepted(id, steps) else {
             return;
         };
@@ -471,7 +580,7 @@ impl Channels {
         if c.sent_close || data.is_empty() {
             return;
         }
-        let channel = ChannelId(id);
+        let channel = ChannelId { connection, id };
         steps.push(Step::Emit(match code {
             None => Action::ChannelData { channel, data },
             Some(code) => Action::ChannelExtendedData {
@@ -482,14 +591,36 @@ impl Channels {
         }));
     }
 
+    /// Opens a channel of type `kind`; the peer's answer arrives as [`Action::ChannelOpened`] or
+    /// [`Action::ChannelOpenFailed`].
+    pub(crate) fn open_channel(
+        &mut self,
+        kind: &str,
+        data: Vec<u8>,
+    ) -> (Option<ChannelId>, Vec<Step>) {
+        let id = self.allocate();
+        let mut channel = self.channel(id, 0, kind.to_owned(), 0, 0);
+        channel.opening = true;
+        self.open.insert(id, channel);
+        let open = ChannelOpen::new(kind.to_owned(), id, self.window, self.max_packet, data);
+        let this = ChannelId {
+            connection: self.connection,
+            id,
+        };
+        (Some(this), vec![Step::Send(Message::ChannelOpen(open))])
+    }
+
     pub(crate) fn accept(&mut self, id: ChannelId, data: Vec<u8>) -> Vec<Step> {
+        let Some(n) = self.local(id) else {
+            return Vec::new();
+        };
         let (window, max_packet) = (self.window, self.max_packet);
-        let Some(c) = self.open.get_mut(&id.0).filter(|c| !c.accepted) else {
+        let Some(c) = self.open.get_mut(&n).filter(|c| !c.accepted && !c.opening) else {
             return Vec::new();
         };
         c.accepted = true;
         vec![Step::Send(Message::ChannelOpenConfirmation(
-            ChannelOpenConfirmation::new(c.peer_id, id.0, window, max_packet, data),
+            ChannelOpenConfirmation::new(c.peer_id, n, window, max_packet, data),
         ))]
     }
 
@@ -499,10 +630,13 @@ impl Channels {
         reason: OpenFailureReason,
         description: &str,
     ) -> Vec<Step> {
-        match self.open.get(&id.0) {
-            Some(c) if !c.accepted => {
+        let Some(n) = self.local(id) else {
+            return Vec::new();
+        };
+        match self.open.get(&n) {
+            Some(c) if !c.accepted && !c.opening => {
                 let peer_id = c.peer_id;
-                self.open.remove(&id.0);
+                self.open.remove(&n);
                 vec![Step::Send(Message::ChannelOpenFailure(
                     ChannelOpenFailure::new(peer_id, reason.code(), description, ""),
                 ))]
@@ -511,14 +645,18 @@ impl Channels {
         }
     }
 
-    /// Queues `out` on channel `id` and sends what the window allows. Nothing happens for a
-    /// channel that is not open or that this side has closed.
+    /// Queues `out` on channel `id` and sends what the window allows; a channel this side is
+    /// opening keeps it until confirmed. Nothing happens for a channel that is not open or
+    /// opening, or that this side has closed.
     pub(crate) fn enqueue(&mut self, id: ChannelId, out: OutKind) -> Vec<Step> {
+        let Some(n) = self.local(id) else {
+            return Vec::new();
+        };
         let mut steps = Vec::new();
         let Some(c) = self
             .open
-            .get_mut(&id.0)
-            .filter(|c| c.accepted && !c.sent_close)
+            .get_mut(&n)
+            .filter(|c| (c.accepted || c.opening) && !c.sent_close)
         else {
             return steps;
         };
@@ -536,7 +674,6 @@ impl Channels {
                 sent: 0,
             },
             OutKind::Eof => Out::Eof,
-            OutKind::Request(kind, want_reply, data) => Out::Request(kind, want_reply, data),
             OutKind::Close => Out::Close,
         };
         c.queue.push_back(out);
@@ -544,24 +681,65 @@ impl Channels {
         steps
     }
 
-    /// Sends `SSH_MSG_CHANNEL_CLOSE` now, dropping whatever is still queued.
-    pub(crate) fn abort(&mut self, id: ChannelId) -> Vec<Step> {
+    /// Queues a request on channel `id`; the token, when it wants a reply, comes back with the
+    /// reply. Nothing happens for a channel that is not open or that this side has closed.
+    pub(crate) fn request(
+        &mut self,
+        id: ChannelId,
+        kind: &str,
+        want_reply: bool,
+        data: Vec<u8>,
+    ) -> (Option<RequestToken>, Vec<Step>) {
+        let (seq, connection) = (self.next_seq, self.connection);
+        let mut steps = Vec::new();
+        let Some(n) = self.local(id) else {
+            return (None, steps);
+        };
         let Some(c) = self
             .open
-            .get_mut(&id.0)
-            .filter(|c| c.accepted && !c.sent_close)
+            .get_mut(&n)
+            .filter(|c| (c.accepted || c.opening) && !c.sent_close)
+        else {
+            return (None, steps);
+        };
+        let token = want_reply.then_some(RequestToken { connection, seq });
+        c.queue.push_back(Out::Request(
+            kind.to_owned(),
+            want_reply.then_some(seq),
+            data,
+        ));
+        flush(c, &mut steps);
+        if want_reply {
+            self.next_seq += 1;
+        }
+        (token, steps)
+    }
+
+    /// Sends `SSH_MSG_CHANNEL_CLOSE` now, dropping whatever is still queued.
+    pub(crate) fn abort(&mut self, id: ChannelId) -> Vec<Step> {
+        let Some(n) = self.local(id) else {
+            return Vec::new();
+        };
+        let Some(c) = self
+            .open
+            .get_mut(&n)
+            .filter(|c| (c.accepted || c.opening) && !c.sent_close)
         else {
             return Vec::new();
         };
+        let mut steps = Vec::new();
+        fail_queued(c, &mut steps);
         c.queue.clear();
         c.queue.push_back(Out::Close);
-        let mut steps = Vec::new();
         flush(c, &mut steps);
         steps
     }
 
     pub(crate) fn reply(&mut self, token: ReplyToken, ok: bool) -> Vec<Step> {
         let mut steps = Vec::new();
+        if token.connection != self.connection {
+            return steps;
+        }
         let Some(c) = self.open.get_mut(&token.channel) else {
             return steps;
         };
@@ -582,21 +760,24 @@ impl Channels {
         steps
     }
 
-    /// Sends a global request at once; a reply, when asked for, is counted as awaited.
+    /// Sends a global request at once; the token, when it wants a reply, comes back with the
+    /// reply.
     pub(crate) fn global_request(
         &mut self,
         kind: &str,
         want_reply: bool,
         data: Vec<u8>,
-    ) -> Vec<Step> {
-        if want_reply {
-            self.global_awaiting += 1;
-        }
-        vec![Step::Send(Message::GlobalRequest(WireGlobalRequest::new(
-            kind.to_owned(),
-            want_reply,
-            data,
-        )))]
+    ) -> (Option<RequestToken>, Vec<Step>) {
+        let token = want_reply.then(|| {
+            let seq = self.seq();
+            self.global_awaiting.push_back(seq);
+            RequestToken {
+                connection: self.connection,
+                seq,
+            }
+        });
+        let request = WireGlobalRequest::new(kind.to_owned(), want_reply, data);
+        (token, vec![Step::Send(Message::GlobalRequest(request))])
     }
 
     pub(crate) fn global_reply(
@@ -605,6 +786,9 @@ impl Channels {
         ok: bool,
         data: Vec<u8>,
     ) -> Vec<Step> {
+        if token.connection != self.connection {
+            return Vec::new();
+        }
         if let Some(entry) = self
             .global_replies
             .iter_mut()
@@ -629,10 +813,13 @@ impl Channels {
     /// Records that the consumer has taken `n` bytes from channel `id`, and gives window back
     /// once more than three maximum packets have been taken or the window is below half.
     pub(crate) fn consumed(&mut self, id: ChannelId, n: u32) -> Vec<Step> {
+        let Some(local) = self.local(id) else {
+            return Vec::new();
+        };
         let (full, max_packet) = (self.window, self.max_packet);
         let Some(c) = self
             .open
-            .get_mut(&id.0)
+            .get_mut(&local)
             .filter(|c| c.accepted && !c.sent_close)
         else {
             return Vec::new();
@@ -655,13 +842,16 @@ pub(crate) enum OutKind {
     Data(Vec<u8>),
     Extended(u32, Vec<u8>),
     Eof,
-    Request(String, bool, Vec<u8>),
     Close,
 }
 
-/// Sends from the front of `c`'s queue for as long as the peer's window allows. Data is split
-/// at the peer's maximum packet; nothing overtakes data the window holds back.
+/// Sends from the front of `c`'s queue for as long as the peer's window allows, once the channel
+/// is open. Data is split at the peer's maximum packet; nothing overtakes data the window holds
+/// back.
 fn flush(c: &mut Channel, steps: &mut Vec<Step>) {
+    if !c.accepted {
+        return;
+    }
     while let Some(front) = c.queue.front_mut() {
         match front {
             Out::Data { code, bytes, sent } => {
@@ -689,24 +879,58 @@ fn flush(c: &mut Channel, steps: &mut Vec<Step>) {
                 c.queue.pop_front();
             }
             Out::Request(..) => {
-                let Some(Out::Request(kind, want_reply, data)) = c.queue.pop_front() else {
+                let Some(Out::Request(kind, reply, data)) = c.queue.pop_front() else {
                     unreachable!()
                 };
-                if want_reply {
-                    c.awaiting += 1;
+                if let Some(seq) = reply {
+                    c.awaiting.push_back(seq);
                 }
                 steps.push(Step::Send(Message::ChannelRequest(WireRequest::new(
-                    c.peer_id, kind, want_reply, data,
+                    c.peer_id,
+                    kind,
+                    reply.is_some(),
+                    data,
                 ))));
             }
             Out::Close => {
                 steps.push(Step::Send(Message::ChannelClose(ChannelClose::new(
                     c.peer_id,
                 ))));
+                c.queue.pop_front();
+                fail_queued(c, steps);
                 c.queue.clear();
                 c.sent_close = true;
                 return;
             }
+        }
+    }
+}
+
+/// A failed reply to the request `seq` on `c`.
+fn failed(c: &Channel, seq: u64) -> Step {
+    let token = RequestToken {
+        connection: c.this.connection,
+        seq,
+    };
+    Step::Emit(Action::ChannelRequestReply {
+        channel: c.this,
+        token,
+        ok: false,
+    })
+}
+
+/// Fails every request on `c` sent with `want_reply` and not yet answered.
+fn fail_awaiting(c: &mut Channel, steps: &mut Vec<Step>) {
+    while let Some(seq) = c.awaiting.pop_front() {
+        steps.push(failed(c, seq));
+    }
+}
+
+/// Fails every request still queued on `c` that wants a reply.
+fn fail_queued(c: &Channel, steps: &mut Vec<Step>) {
+    for out in &c.queue {
+        if let Out::Request(_, Some(seq), _) = out {
+            steps.push(failed(c, *seq));
         }
     }
 }

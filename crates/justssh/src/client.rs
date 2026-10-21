@@ -21,8 +21,8 @@ impl Client {
                 config.rng,
                 config.version,
                 0,
-                crate::config::DEFAULT_CHANNEL_WINDOW,
-                crate::config::DEFAULT_CHANNEL_MAX_PACKET,
+                config.channel_window,
+                config.channel_max_packet,
             ),
         }
     }
@@ -100,4 +100,8 @@ impl Client {
     pub fn answer_prompts(&mut self, answers: Vec<Zeroizing<Vec<u8>>>) -> Vec<Action> {
         self.transport.answer_prompts(&answers)
     }
+
+    crate::endpoint::connection_methods!();
 }
+
+crate::endpoint::impl_endpoint!(Client);

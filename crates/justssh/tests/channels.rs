@@ -268,7 +268,11 @@ fn data_eof_and_a_request_wait_behind_data_the_window_holds_back() {
     let mut actions = server.channel_data(id, b"0123456789abcdefghij");
     actions.extend(server.channel_extended_data(id, 1, b"err"));
     actions.extend(server.channel_eof(id));
-    actions.extend(server.channel_request(id, "exit-status", false, 7u32.to_be_bytes().to_vec()));
+    actions.extend(
+        server
+            .channel_request(id, "exit-status", false, 7u32.to_be_bytes().to_vec())
+            .1,
+    );
     actions.extend(server.channel_close(id));
     let first = replies(&mut client, &actions);
     assert!(
@@ -541,7 +545,7 @@ fn everything_sent_on_a_channel_is_addressed_to_the_peers_id() {
     let mut actions = server.channel_data(id, b"d");
     actions.extend(server.channel_extended_data(id, 1, b"e"));
     actions.extend(server.channel_eof(id));
-    actions.extend(server.channel_request(id, "r", false, Vec::new()));
+    actions.extend(server.channel_request(id, "r", false, Vec::new()).1);
     let chunk = vec![0u8; (4 * MAX_PACKET) as usize];
     actions.extend(send(&mut server, &mut client, &[]));
     let mut out = replies(&mut client, &actions);
@@ -572,8 +576,8 @@ fn everything_sent_on_a_channel_is_addressed_to_the_peers_id() {
 fn replies_to_our_requests_come_back_in_order() {
     let (mut server, mut client) = connected();
     let id = open_with_peer_id(&mut server, &mut client, 50, WINDOW);
-    server.channel_request(id, "a", true, Vec::new());
-    server.channel_request(id, "b", true, Vec::new());
+    let (a, _) = server.channel_request(id, "a", true, Vec::new());
+    let (b, _) = server.channel_request(id, "b", true, Vec::new());
     let actions = send(
         &mut server,
         &mut client,
@@ -582,14 +586,16 @@ fn replies_to_our_requests_come_back_in_order() {
             Message::ChannelSuccess(justssh_wire::ChannelSuccess::new(id.get())),
         ],
     );
-    let oks: Vec<bool> = actions
+    let oks: Vec<_> = actions
         .iter()
-        .filter_map(|a| match a {
-            Action::ChannelRequestReply { channel, ok } if *channel == id => Some(*ok),
+        .filter_map(|r| match r {
+            Action::ChannelRequestReply { channel, token, ok } if *channel == id => {
+                Some((Some(*token), *ok))
+            }
             _ => None,
         })
         .collect();
-    assert_eq!(oks, vec![false, true]);
+    assert_eq!(oks, vec![(a, false), (b, true)]);
 }
 
 #[test]
