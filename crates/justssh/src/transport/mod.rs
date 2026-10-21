@@ -261,6 +261,21 @@ impl Transport {
         std::mem::take(&mut self.actions)
     }
 
+    /// [`channels`](Self::channels) for a command that also returns a value; before the
+    /// connection is authenticated nothing happens and the value is its default.
+    pub(crate) fn channels_with<T: Default>(
+        &mut self,
+        command: impl FnOnce(&mut Channels) -> (T, Vec<Step>),
+    ) -> (T, Vec<Action>) {
+        let mut value = T::default();
+        if self.phase == Phase::Connected {
+            let (v, steps) = command(&mut self.channels);
+            value = v;
+            self.run(steps);
+        }
+        (value, std::mem::take(&mut self.actions))
+    }
+
     pub(crate) fn channel_info(&self, id: ChannelId) -> Option<ChannelInfo> {
         self.channels.info(id)
     }

@@ -16,7 +16,7 @@ The tokio `Session` cannot answer while `data` or `extended_data` waits for the 
 
 ## Sent requests do not wait for channels
 
-`Server::global_request` sends at once; nothing queued on a channel holds it back. A reply arrives as `Action::GlobalRequestReply`, in the order the requests were sent. A reply that answers no request this side sent is dropped, as x/crypto/ssh drops it (`mux.go` `handleGlobalPacket`).
+`global_request` sends at once; nothing queued on a channel holds it back. A request wanting a reply returns a `RequestToken`, and its reply arrives as `Action::GlobalRequestReply` carrying that token; the peer answers in the order the requests were sent, which is how the token is found. A reply that answers no request this side sent is dropped, as x/crypto/ssh drops it (`mux.go` `handleGlobalPacket`).
 
 A peer that answers a sent request with `SSH_MSG_UNIMPLEMENTED` instead leaves it awaited for ever, and the next stray reply is taken as its answer. x/crypto/ssh's `SendRequest` waits for ever the same way; no peer was found that does not know message 80. Left so on #6.
 

@@ -5,7 +5,9 @@ use core::fmt;
 use justssh_wire::DecodeError;
 use zeroize::Zeroizing;
 
-use crate::connection::{ChannelId, ChannelOpenRequest, ChannelRequest, GlobalRequest};
+use crate::connection::{
+    ChannelId, ChannelOpenRequest, ChannelRequest, GlobalRequest, OpenFailureReason, RequestToken,
+};
 use crate::handshake::{AlgorithmCategory, Handshake};
 
 /// Input to [`Server::process`](crate::Server::process) and
@@ -57,11 +59,24 @@ pub enum Action {
     KeyboardInteractive(InfoRequest),
     /// A global request from the peer, passed through unparsed.
     GlobalRequest(GlobalRequest),
-    /// The reply to a global request this side sent with `want_reply`, with everything after
-    /// the message number; replies arrive in the order the requests were sent.
-    GlobalRequestReply { ok: bool, data: Vec<u8> },
+    /// The reply to the global request this side sent with `token`, with everything after the
+    /// message number.
+    GlobalRequestReply {
+        token: RequestToken,
+        ok: bool,
+        data: Vec<u8>,
+    },
     /// The peer asks to open a channel.
     ChannelOpenRequest(ChannelOpenRequest),
+    /// The peer confirmed a channel this side opened; `data` is the channel-type-specific part
+    /// of the confirmation.
+    ChannelOpened { channel: ChannelId, data: Vec<u8> },
+    /// The peer refused a channel this side opened; the channel id is free.
+    ChannelOpenFailed {
+        channel: ChannelId,
+        reason: OpenFailureReason,
+        description: String,
+    },
     /// A channel request from the peer, passed through unparsed.
     ChannelRequest(ChannelRequest),
     /// Data the peer sent on a channel. Report it with `channel_consumed` once taken, so the
@@ -77,9 +92,13 @@ pub enum Action {
     ChannelEof { channel: ChannelId },
     /// The channel is closed in both directions and its id is free.
     ChannelClosed { channel: ChannelId },
-    /// The reply to a channel request this side sent with `want_reply`; replies arrive in the
-    /// order the requests were sent.
-    ChannelRequestReply { channel: ChannelId, ok: bool },
+    /// The reply to the channel request this side sent with `token`; a failure too when the
+    /// channel closed, was aborted or was refused before the peer replied.
+    ChannelRequestReply {
+        channel: ChannelId,
+        token: RequestToken,
+        ok: bool,
+    },
     /// The connection is over; nothing more will be written or accepted.
     Closed(Closed),
     /// A payload received after the first key exchange, handed over undecoded instead of being
@@ -276,6 +295,8 @@ pub enum Error {
     ChannelWindowExceeded,
     /// The peer sent channel data larger than the maximum packet this side announced.
     ChannelPacketTooLarge,
+    /// The peer confirmed a channel with a maximum packet below 9 or above 2^31.
+    InvalidChannelMaxPacket,
     /// A window adjustment would take the peer's window past 2^32 − 1.
     ChannelWindowOverflow,
     /// A sequence number would repeat under one key.
@@ -309,6 +330,7 @@ impl fmt::Display for Error {
                 f.write_str("channel data exceeds the maximum packet size")
             }
             Error::ChannelWindowOverflow => f.write_str("channel window overflow"),
+            Error::InvalidChannelMaxPacket => f.write_str("invalid channel maximum packet"),
             Error::SequenceWrap => f.write_str("sequence number would repeat under one key"),
         }
     }

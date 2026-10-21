@@ -258,3 +258,42 @@ pub fn replies(client: &mut Client, actions: &[Action]) -> Vec<Message> {
     }
     out
 }
+
+/// What the server did with the bytes `actions` from the client carry.
+pub fn to_server(server: &mut Server, actions: Vec<Action>) -> Vec<Action> {
+    let mut out = Vec::new();
+    for a in actions {
+        if let Action::Write(b) = a {
+            out.extend(server.process(Event::Received(&b)));
+        }
+    }
+    out
+}
+
+/// What the client did with the bytes `actions` from the server carry.
+pub fn to_client(client: &mut Client, actions: Vec<Action>) -> Vec<Action> {
+    let mut out = Vec::new();
+    for a in actions {
+        if let Action::Write(b) = a {
+            out.extend(client.process(Event::Received(&b)));
+        }
+    }
+    out
+}
+
+/// A server and a client, both through password authentication and in the connection protocol.
+pub fn authenticated_pair() -> (Server, Client) {
+    let (mut server, mut client) = (server(), client());
+    let (s, c) = pump(&mut server, &mut client, usize::MAX);
+    assert!(s.closed.is_none() && c.closed.is_none());
+    let request = client.auth_password(justssh::Zeroizing::new(b"pw".to_vec()));
+    let at_server = to_server(&mut server, request);
+    assert!(matches!(
+        at_server.first(),
+        Some(Action::PasswordRequest(_))
+    ));
+    to_client(&mut client, server.process(Event::AuthAccepted));
+    assert_eq!(server.phase(), Phase::Connected);
+    assert_eq!(client.phase(), Phase::Connected);
+    (server, client)
+}
