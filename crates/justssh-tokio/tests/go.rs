@@ -1,5 +1,5 @@
 //! justssh against x/crypto/ssh v0.55 (`ci/go-interop`): the lists each side offers, and every key
-//! exchange, cipher and MAC in both directions. Without `go` each test is skipped, unless
+//! exchange, cipher, MAC and host key algorithm in both directions. Without `go` each test is skipped, unless
 //! `JUSTSSH_REQUIRE_GO` is set.
 
 use std::path::PathBuf;
@@ -8,14 +8,17 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use justssh::{
-    Algorithms, Client, ClientConfig, HostKey, InfoRequest, KexInitRecord, Server, ServerConfig,
-    Zeroizing,
+    Algorithms, Client, ClientConfig, EcdsaCurve, HostKey, InfoRequest, KexInitRecord, PrivateKey,
+    Server, ServerConfig, Zeroizing,
 };
 use justssh_tokio::{Accepted, AuthMethod, ClientHandler, Connected, Deadlines};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::time::timeout;
+
+#[path = "../../justssh/tests/common/test_keys.rs"]
+mod test_keys;
 
 const LIMIT: Duration = Duration::from_secs(60);
 
@@ -75,21 +78,27 @@ fn args(kex: &str, cipher: &str, mac: &str) -> Vec<String> {
 /// A Go client with `kex`, `cipher` and `mac` (empty for its defaults) against the justssh
 /// server; the server once it authenticated the client.
 async fn go_client(go: &PathBuf, kex: &str, cipher: &str, mac: &str) -> Server {
+    let config = ServerConfig::builder(HostKey::ed25519_from_seed(Zeroizing::new([7; 32]))).build();
+    go_client_with(go, args(kex, cipher, mac), config).await
+}
+
+/// A Go client with the flags `args` against a justssh server with `config`; the server once it
+/// authenticated the client.
+async fn go_client_with(go: &PathBuf, args: Vec<String>, config: ServerConfig) -> Server {
+    let label = args.join(" ");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let child = Command::new(go)
         .arg("client")
         .args(["-addr", &addr])
-        .args(args(kex, cipher, mac))
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
     let (stream, _) = timeout(LIMIT, listener.accept()).await.unwrap().unwrap();
-    let mut server = Server::new(
-        ServerConfig::builder(HostKey::ed25519_from_seed(Zeroizing::new([7; 32]))).build(),
-    );
+    let mut server = Server::new(config);
     let accepted = timeout(
         LIMIT,
         justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
@@ -102,7 +111,7 @@ async fn go_client(go: &PathBuf, kex: &str, cipher: &str, mac: &str) -> Server {
     .unwrap();
     assert!(
         matches!(accepted, Accepted::Authenticated { .. }),
-        "{kex} {cipher} {mac}: {accepted:?}"
+        "{label}: {accepted:?}"
     );
     let out = timeout(LIMIT, child.wait_with_output())
         .await
@@ -110,7 +119,7 @@ async fn go_client(go: &PathBuf, kex: &str, cipher: &str, mac: &str) -> Server {
         .unwrap();
     assert!(
         out.status.success(),
-        "Go client {kex} {cipher} {mac}: {}",
+        "Go client {label}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     server
@@ -130,9 +139,17 @@ async fn go_server_offering(
     mac: &str,
     strict: bool,
 ) -> Client {
+    let config = ClientConfig::builder(b"alice").strict_kex(strict).build();
+    go_server_with(go, args(kex, cipher, mac), config).await
+}
+
+/// The justssh client with `config` against a Go server with the flags `args`; the client once
+/// authenticated.
+async fn go_server_with(go: &PathBuf, args: Vec<String>, config: ClientConfig) -> Client {
+    let label = args.join(" ");
     let mut child = Command::new(go)
         .arg("server")
-        .args(args(kex, cipher, mac))
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -147,7 +164,7 @@ async fn go_server_offering(
     let io = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
         .unwrap();
-    let mut client = Client::new(ClientConfig::builder(b"alice").strict_kex(strict).build());
+    let mut client = Client::new(config);
     let connected = timeout(
         LIMIT,
         justssh_tokio::connect(
@@ -163,7 +180,7 @@ async fn go_server_offering(
     .unwrap();
     assert!(
         matches!(connected, Connected::Authenticated { .. }),
-        "Go server {kex} {cipher} {mac}: {connected:?}"
+        "Go server {label}: {connected:?}"
     );
     let line = timeout(LIMIT, lines.next_line()).await.unwrap().unwrap();
     assert_eq!(line.as_deref(), Some("authenticated"));
@@ -284,4 +301,139 @@ async fn the_client_connects_to_a_go_server_without_strict_kex() {
         check(algs, "", "aes128-ctr", mac);
         assert!(!algs.strict_kex(), "{mac}");
     }
+}
+
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+fn rsa() -> PrivateKey {
+    PrivateKey::rsa(
+        &hex(test_keys::RSA_N),
+        &hex(test_keys::RSA_E),
+        Zeroizing::new(hex(test_keys::RSA_D)),
+        Zeroizing::new(hex(test_keys::RSA_P)),
+        Zeroizing::new(hex(test_keys::RSA_Q)),
+    )
+    .unwrap()
+}
+
+fn ed25519() -> HostKey {
+    HostKey::ed25519_from_seed(Zeroizing::new([7; 32]))
+}
+
+/// The Go broker's host keys: ed25519, then RSA offered only as `ssh-rsa`.
+fn broker_config() -> ServerConfig {
+    ServerConfig::builder(ed25519())
+        .host_key(HostKey::new(rsa()).with_algorithms(&["ssh-rsa"]).unwrap())
+        .build()
+}
+
+const HOST_KEY_ALGORITHMS: &[&str] = &[
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "rsa-sha2-256",
+    "rsa-sha2-512",
+    "ssh-rsa",
+    "ssh-ed25519",
+];
+
+fn host_key_algorithms(k: &KexInitRecord) -> Vec<String> {
+    k.message().server_host_key_algorithms.clone()
+}
+
+#[tokio::test]
+async fn the_server_offers_the_go_brokers_host_keys_as_a_go_server_does() {
+    let Some(go) = harness() else { return };
+    let client = go_server_with(
+        &go,
+        vec!["-hostkeys".into(), "broker".into()],
+        ClientConfig::builder(b"alice").build(),
+    )
+    .await;
+    let go_offers = host_key_algorithms(client.handshake().peer_kexinit().unwrap());
+    let server = go_client_with(&go, Vec::new(), broker_config()).await;
+    let we_offer = host_key_algorithms(server.handshake().local_kexinit().unwrap());
+    assert_eq!(we_offer, go_offers);
+    assert_eq!(we_offer, ["ssh-ed25519", "ssh-rsa"]);
+}
+
+#[tokio::test]
+async fn a_go_client_offering_only_ssh_rsa_connects_to_the_go_brokers_host_keys() {
+    let Some(go) = harness() else { return };
+    let server = go_client_with(
+        &go,
+        vec!["-hostkeyalgs".into(), "ssh-rsa".into()],
+        broker_config(),
+    )
+    .await;
+    assert_eq!(
+        server.handshake().negotiated().unwrap().host_key(),
+        "ssh-rsa"
+    );
+}
+
+#[tokio::test]
+async fn a_go_client_verifies_each_host_key_algorithm_of_the_server() {
+    let Some(go) = harness() else { return };
+    for algorithm in HOST_KEY_ALGORITHMS {
+        let config = ServerConfig::builder(ed25519())
+            .host_key(HostKey::new(rsa()))
+            .host_key(HostKey::new(
+                PrivateKey::ecdsa(EcdsaCurve::P256, Zeroizing::new(vec![1; 32])).unwrap(),
+            ))
+            .host_key(HostKey::new(
+                PrivateKey::ecdsa(EcdsaCurve::P384, Zeroizing::new(vec![1; 48])).unwrap(),
+            ))
+            .host_key(HostKey::new(
+                PrivateKey::ecdsa(EcdsaCurve::P521, Zeroizing::new(vec![1; 66])).unwrap(),
+            ))
+            .build();
+        let server = go_client_with(
+            &go,
+            vec!["-hostkeyalgs".into(), (*algorithm).into()],
+            config,
+        )
+        .await;
+        assert_eq!(
+            server.handshake().negotiated().unwrap().host_key(),
+            *algorithm
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_client_verifies_each_host_key_algorithm_of_a_go_server() {
+    let Some(go) = harness() else { return };
+    for algorithm in HOST_KEY_ALGORITHMS {
+        let client = go_server_with(
+            &go,
+            vec!["-hostkeys".into(), "all".into()],
+            ClientConfig::builder(b"alice")
+                .host_key_algorithms(&[algorithm])
+                .build(),
+        )
+        .await;
+        assert_eq!(
+            client.handshake().negotiated().unwrap().host_key(),
+            *algorithm
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_client_offers_a_go_clients_host_key_algorithms_without_certificates_and_dsa() {
+    let Some(go) = harness() else { return };
+    let server = go_client(&go, "", "", "").await;
+    let go_offers: Vec<String> = host_key_algorithms(server.handshake().peer_kexinit().unwrap())
+        .into_iter()
+        .filter(|a| !a.contains("-cert-") && a != "ssh-dss")
+        .collect();
+    let client = go_server(&go, "", "", "").await;
+    let we_offer = host_key_algorithms(client.handshake().local_kexinit().unwrap());
+    assert_eq!(we_offer, go_offers);
 }

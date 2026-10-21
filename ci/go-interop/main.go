@@ -1,15 +1,24 @@
 // Command go-interop runs one x/crypto/ssh v0.55 connection against justssh for its tests.
 //
-//	go-interop server -kex K -cipher C -mac M   listens on 127.0.0.1, prints the port, serves one connection
-//	go-interop client -addr A -kex K -cipher C -mac M   connects once
+//	go-interop server -kex K -cipher C -mac M -hostkeys H   listens on 127.0.0.1, prints the port, serves one connection
+//	go-interop client -addr A -kex K -cipher C -mac M -hostkeyalgs A   connects once
 //
-// Empty -kex, -cipher and -mac leave x/crypto/ssh's defaults. Both sides authenticate user
-// "alice" with password "pw"; the server's host key is ed25519 from a seed of 32 bytes of 7.
+// Empty -kex, -cipher, -mac and -hostkeyalgs leave x/crypto/ssh's defaults. Both sides
+// authenticate user "alice" with password "pw". The server's host keys are, by -hostkeys:
+//
+//	ed25519   ed25519 from a seed of 32 bytes of 7 (the default)
+//	broker    that key, then a new RSA-2048 key offered only as ssh-rsa, as acwbroker does
+//	all       that key, a new RSA-2048 key, and new ECDSA P-256, P-384 and P-521 keys
+//
 // The exit status is 0 once the connection is authenticated.
 package main
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"flag"
 	"fmt"
 	"net"
@@ -36,15 +45,17 @@ func main() {
 	kex := fs.String("kex", "", "key exchanges, comma-separated")
 	cipher := fs.String("cipher", "", "ciphers, comma-separated")
 	mac := fs.String("mac", "", "MACs, comma-separated")
+	hostKeys := fs.String("hostkeys", "ed25519", "server host keys: ed25519, broker or all")
+	hostKeyAlgs := fs.String("hostkeyalgs", "", "client host key algorithms, comma-separated")
 	_ = fs.Parse(os.Args[2:])
 	algorithms := ssh.Config{KeyExchanges: list(*kex), Ciphers: list(*cipher), MACs: list(*mac)}
 
 	var err error
 	switch os.Args[1] {
 	case "server":
-		err = serve(algorithms)
+		err = serve(algorithms, *hostKeys)
 	case "client":
-		err = connect(*addr, algorithms)
+		err = connect(*addr, algorithms, list(*hostKeyAlgs))
 	default:
 		err = fmt.Errorf("unknown mode %q", os.Args[1])
 	}
@@ -54,12 +65,52 @@ func main() {
 	}
 }
 
-func serve(algorithms ssh.Config) error {
+// signers returns the host keys -hostkeys names, in the order they are added.
+func signers(hostKeys string) ([]ssh.Signer, error) {
 	seed := make([]byte, ed25519.SeedSize)
 	for i := range seed {
 		seed[i] = 7
 	}
-	signer, err := ssh.NewSignerFromKey(ed25519.NewKeyFromSeed(seed))
+	keys := []any{ed25519.NewKeyFromSeed(seed)}
+	switch hostKeys {
+	case "ed25519":
+	case "broker", "all":
+		r, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, r)
+		if hostKeys == "all" {
+			for _, c := range []elliptic.Curve{elliptic.P256(), elliptic.P384(), elliptic.P521()} {
+				k, err := ecdsa.GenerateKey(c, rand.Reader)
+				if err != nil {
+					return nil, err
+				}
+				keys = append(keys, k)
+			}
+		}
+	default:
+		return nil, fmt.Errorf("unknown -hostkeys %q", hostKeys)
+	}
+	var out []ssh.Signer
+	for _, k := range keys {
+		s, err := ssh.NewSignerFromKey(k)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := k.(*rsa.PrivateKey); ok && hostKeys == "broker" {
+			s, err = ssh.NewSignerWithAlgorithms(s.(ssh.AlgorithmSigner), []string{ssh.KeyAlgoRSA})
+			if err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+func serve(algorithms ssh.Config, hostKeys string) error {
+	keys, err := signers(hostKeys)
 	if err != nil {
 		return err
 	}
@@ -72,7 +123,9 @@ func serve(algorithms ssh.Config) error {
 			return nil, fmt.Errorf("wrong password")
 		},
 	}
-	config.AddHostKey(signer)
+	for _, k := range keys {
+		config.AddHostKey(k)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
@@ -98,12 +151,13 @@ func serve(algorithms ssh.Config) error {
 	return sconn.Close()
 }
 
-func connect(addr string, algorithms ssh.Config) error {
+func connect(addr string, algorithms ssh.Config, hostKeyAlgs []string) error {
 	config := &ssh.ClientConfig{
-		Config:          algorithms,
-		User:            "alice",
-		Auth:            []ssh.AuthMethod{ssh.Password("pw")},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Config:            algorithms,
+		HostKeyAlgorithms: hostKeyAlgs,
+		User:              "alice",
+		Auth:              []ssh.AuthMethod{ssh.Password("pw")},
+		HostKeyCallback:   ssh.InsecureIgnoreHostKey(),
 	}
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {

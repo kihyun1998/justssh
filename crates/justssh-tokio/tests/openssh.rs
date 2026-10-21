@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use justssh::{
-    Closed, DisconnectReason, Error, HostKey, Phase, Server, ServerConfig, ServerConfigBuilder,
-    Zeroizing,
+    Closed, DisconnectReason, EcdsaCurve, Error, HostKey, Phase, PrivateKey, Server, ServerConfig,
+    ServerConfigBuilder, Zeroizing,
 };
 use justssh_tokio::{Accepted, Deadlines};
 use tokio::net::TcpListener;
@@ -17,6 +17,9 @@ use tokio::process::Command;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+
+#[path = "../../justssh/tests/common/test_keys.rs"]
+mod test_keys;
 
 const LIMIT: Duration = Duration::from_secs(60);
 const PASSWORD: &str = "s3cret";
@@ -86,12 +89,20 @@ type Outcome = (std::io::Result<Result<String, Closed>>, Server);
 /// Accepts one connection and authenticates it, accepting the password `PASSWORD` and handing
 /// back the user name as the accepted value.
 async fn accept_one(max_auth_tries: u32, gate: Option<Arc<Notify>>) -> (u16, JoinHandle<Outcome>) {
+    let limit = NonZeroU32::new(max_auth_tries).unwrap();
+    accept_one_with(config(|b| b.max_auth_tries(limit)), gate).await
+}
+
+/// As [`accept_one`], for a server with `config`.
+async fn accept_one_with(
+    config: ServerConfig,
+    gate: Option<Arc<Notify>>,
+) -> (u16, JoinHandle<Outcome>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let limit = NonZeroU32::new(max_auth_tries).unwrap();
-        let mut server = Server::new(config(|b| b.max_auth_tries(limit)));
+        let mut server = Server::new(config);
         let accepted = justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |req| {
             let gate = gate.clone();
             async move {
@@ -344,4 +355,83 @@ async fn openssh_connects_under_each_key_exchange_cipher_and_mac() {
 {log}"
         );
     }
+}
+
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+fn rsa() -> PrivateKey {
+    PrivateKey::rsa(
+        &hex(test_keys::RSA_N),
+        &hex(test_keys::RSA_E),
+        Zeroizing::new(hex(test_keys::RSA_D)),
+        Zeroizing::new(hex(test_keys::RSA_P)),
+        Zeroizing::new(hex(test_keys::RSA_Q)),
+    )
+    .unwrap()
+}
+
+/// Logs in with `ssh` offering only host key algorithm `algorithm` to a server with `config`, and
+/// checks that it was the one used.
+async fn log_in_under_host_key(config: ServerConfig, algorithm: &str) {
+    let (port, task) = accept_one_with(config, None).await;
+    let log = ssh_with(
+        port,
+        PASSWORD,
+        &["-o", &format!("HostKeyAlgorithms={algorithm}")],
+    )
+    .await;
+    let (outcome, _) = finish(task).await;
+    assert!(
+        matches!(outcome, Ok(Ok(_))),
+        "{algorithm} not authenticated: {outcome:?}
+{log}"
+    );
+    assert!(
+        log.contains(&format!("kex: host key algorithm: {algorithm}")),
+        "{algorithm}:
+{log}"
+    );
+}
+
+#[tokio::test]
+async fn openssh_verifies_each_host_key_algorithm_of_the_server() {
+    let supported = supported("HostKeyAlgorithms");
+    for algorithm in [
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521",
+        "rsa-sha2-256",
+        "rsa-sha2-512",
+        "ssh-rsa",
+        "ssh-ed25519",
+    ] {
+        assert!(
+            supported.iter().any(|s| s == algorithm),
+            "this ssh has no {algorithm}"
+        );
+        let config = config(|b| {
+            b.host_key(HostKey::new(rsa()))
+                .host_key(HostKey::new(
+                    PrivateKey::ecdsa(EcdsaCurve::P256, Zeroizing::new(vec![1; 32])).unwrap(),
+                ))
+                .host_key(HostKey::new(
+                    PrivateKey::ecdsa(EcdsaCurve::P384, Zeroizing::new(vec![1; 48])).unwrap(),
+                ))
+                .host_key(HostKey::new(
+                    PrivateKey::ecdsa(EcdsaCurve::P521, Zeroizing::new(vec![1; 66])).unwrap(),
+                ))
+        });
+        log_in_under_host_key(config, algorithm).await;
+    }
+}
+
+#[tokio::test]
+async fn openssh_offering_only_ssh_rsa_connects_to_the_go_brokers_host_keys() {
+    let config = config(|b| b.host_key(HostKey::new(rsa()).with_algorithms(&["ssh-rsa"]).unwrap()));
+    log_in_under_host_key(config, "ssh-rsa").await;
 }
