@@ -5,7 +5,7 @@ use core::fmt;
 use justssh_wire::DecodeError;
 use zeroize::Zeroizing;
 
-use crate::connection::{ChannelId, ChannelOpenRequest, ChannelRequest};
+use crate::connection::{ChannelId, ChannelOpenRequest, ChannelRequest, GlobalRequest};
 use crate::handshake::{AlgorithmCategory, Handshake};
 
 /// Input to [`Server::process`](crate::Server::process) and
@@ -34,6 +34,11 @@ pub enum Action {
     /// A client asks to authenticate with a password. Nothing further is processed until the
     /// consumer answers with [`Event::AuthAccepted`] or [`Event::AuthRejected`].
     PasswordRequest(PasswordRequest),
+    /// A global request from the peer, passed through unparsed.
+    GlobalRequest(GlobalRequest),
+    /// The reply to a global request this side sent with `want_reply`, with everything after
+    /// the message number; replies arrive in the order the requests were sent.
+    GlobalRequestReply { ok: bool, data: Vec<u8> },
     /// The peer asks to open a channel.
     ChannelOpenRequest(ChannelOpenRequest),
     /// A channel request from the peer, passed through unparsed.

@@ -26,7 +26,7 @@ On `SSH_MSG_CHANNEL_CLOSE` the core sends its own close if it has not already, d
 
 ## The adapter's session waits for the window, and is cancel-safe
 
-`Session::data` and `extended_data` return only once the peer's window has taken everything, reading meanwhile and keeping what arrives for `next` — the backpressure x/crypto/ssh's blocking `Write` gives `io.Copy`. Without it a relay that forwards in a loop buffers without limit when the far side stops reading.
+`Session::data` and `extended_data` return only once the peer's window has taken everything, reading meanwhile and keeping what arrives for `next`, so no request is answered until it returns (#26) — the backpressure x/crypto/ssh's blocking `Write` gives `io.Copy`. Without it a relay that forwards in a loop buffers without limit when the far side stops reading.
 
 `Session` writes one `write` at a time and remembers how far it got, so a call cancelled in a `select!` leaves no half-written packet; the rest goes out on the next call. A command has taken effect once called, so a cancelled one must not be repeated. Nothing tests cancellation: the proof is the code reading.
 

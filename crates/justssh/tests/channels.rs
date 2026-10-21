@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use justssh::{Action, ChannelId, Client, Closed, Error, Event, Phase, Server};
+use justssh::{Action, ChannelId, Client, Closed, Error, Event, Server};
 use justssh_wire::{
     ChannelClose, ChannelData, ChannelEof, ChannelExtendedData, ChannelOpen, ChannelRequest,
     ChannelWindowAdjust, Message, UserauthRequest,
@@ -11,54 +11,6 @@ use justssh_wire::{
 
 const WINDOW: u32 = 2 * 1024 * 1024;
 const MAX_PACKET: u32 = 32 * 1024;
-
-/// A server and a raw-mode client, authenticated and connected.
-fn connected() -> (Server, Client) {
-    let mut server = server();
-    let mut client = client();
-    let (s, c) = pump(&mut server, &mut client, usize::MAX);
-    assert!(s.closed.is_none() && c.closed.is_none());
-    client.set_raw_receive(true);
-    let mut pw = vec![0, 0, 0, 0, 2];
-    pw.extend(b"pw");
-    let req = Message::UserauthRequest(UserauthRequest::new(
-        b"u".to_vec(),
-        "ssh-connection",
-        "password",
-        pw,
-    ));
-    send(&mut server, &mut client, &[req]);
-    let actions = server.process(Event::AuthAccepted);
-    replies(&mut client, &actions);
-    assert_eq!(server.phase(), Phase::Connected);
-    (server, client)
-}
-
-fn send(server: &mut Server, client: &mut Client, messages: &[Message]) -> Vec<Action> {
-    let mut bytes = Vec::new();
-    for m in messages {
-        for a in client.send_raw(&m.encode()) {
-            if let Action::Write(b) = a {
-                bytes.extend(b);
-            }
-        }
-    }
-    server.process(Event::Received(&bytes))
-}
-
-fn replies(client: &mut Client, actions: &[Action]) -> Vec<Message> {
-    let mut out = Vec::new();
-    for a in actions {
-        if let Action::Write(b) = a {
-            for r in client.process(Event::Received(b)) {
-                if let Action::RawReceived(p) = r {
-                    out.push(Message::decode(&p).unwrap());
-                }
-            }
-        }
-    }
-    out
-}
 
 /// The peer opens channel `peer_id` with `window` and the server accepts it.
 fn open(server: &mut Server, client: &mut Client, peer_id: u32, window: u32) -> ChannelId {

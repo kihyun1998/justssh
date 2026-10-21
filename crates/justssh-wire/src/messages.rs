@@ -179,6 +179,9 @@ pub enum Message {
     UserauthSuccess(UserauthSuccess),
     Ping(Ping),
     Pong(Pong),
+    GlobalRequest(GlobalRequest),
+    RequestSuccess(RequestSuccess),
+    RequestFailure(RequestFailure),
     ChannelOpen(ChannelOpen),
     ChannelOpenConfirmation(ChannelOpenConfirmation),
     ChannelOpenFailure(ChannelOpenFailure),
@@ -279,6 +282,18 @@ impl Message {
             }
             Message::Pong(m) => {
                 w.u8(number::PONG).string(&m.data);
+            }
+            Message::GlobalRequest(m) => {
+                w.u8(number::GLOBAL_REQUEST)
+                    .string(m.kind.as_bytes())
+                    .bool(m.want_reply)
+                    .bytes(&m.data);
+            }
+            Message::RequestSuccess(m) => {
+                w.u8(number::REQUEST_SUCCESS).bytes(&m.data);
+            }
+            Message::RequestFailure(m) => {
+                w.u8(number::REQUEST_FAILURE).bytes(&m.data);
             }
             Message::ChannelOpen(m) => {
                 w.u8(number::CHANNEL_OPEN)
@@ -427,6 +442,24 @@ impl Message {
             number::USERAUTH_SUCCESS => Message::UserauthSuccess(UserauthSuccess),
             number::PING => Message::Ping(Ping::new(r.string()?.to_vec())),
             number::PONG => Message::Pong(Pong::new(r.string()?.to_vec())),
+            number::GLOBAL_REQUEST => {
+                let kind = r.utf8()?.to_owned();
+                let want_reply = r.bool()?;
+                let data = r.remaining().to_vec();
+                return Ok(Message::GlobalRequest(GlobalRequest::new(
+                    kind, want_reply, data,
+                )));
+            }
+            number::REQUEST_SUCCESS => {
+                return Ok(Message::RequestSuccess(RequestSuccess::new(
+                    r.remaining().to_vec(),
+                )));
+            }
+            number::REQUEST_FAILURE => {
+                return Ok(Message::RequestFailure(RequestFailure::new(
+                    r.remaining().to_vec(),
+                )));
+            }
             number::CHANNEL_OPEN => {
                 let kind = r.utf8()?.to_owned();
                 let (sender, window, max_packet) = (r.u32()?, r.u32()?, r.u32()?);
@@ -568,6 +601,51 @@ pub struct Ping {
 impl Ping {
     pub fn new(data: Vec<u8>) -> Self {
         Ping { data }
+    }
+}
+
+/// `SSH_MSG_GLOBAL_REQUEST` (RFC 4254 §4). `data` is the request-specific part, undecoded.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GlobalRequest {
+    pub kind: String,
+    pub want_reply: bool,
+    pub data: Vec<u8>,
+}
+
+impl GlobalRequest {
+    pub fn new(kind: String, want_reply: bool, data: Vec<u8>) -> Self {
+        GlobalRequest {
+            kind,
+            want_reply,
+            data,
+        }
+    }
+}
+
+/// `SSH_MSG_REQUEST_SUCCESS`: everything after the number, undecoded.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestSuccess {
+    pub data: Vec<u8>,
+}
+
+impl RequestSuccess {
+    pub fn new(data: Vec<u8>) -> Self {
+        RequestSuccess { data }
+    }
+}
+
+/// `SSH_MSG_REQUEST_FAILURE`: everything after the number, undecoded.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestFailure {
+    pub data: Vec<u8>,
+}
+
+impl RequestFailure {
+    pub fn new(data: Vec<u8>) -> Self {
+        RequestFailure { data }
     }
 }
 

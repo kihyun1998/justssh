@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 238b663d61e9acdebf27ea0aacfb04df3f4e7a59ebba691bc46d0d1a0d62495b # shrinks to m = RequestSuccess(RequestSuccess { data: [0] })
+cc 34c5161a9d449cc34cf9b8294ba6a214a6dc1f412cefbd3da1390a73e888723d # shrinks to m = GlobalRequest(GlobalRequest { kind: "-", want_reply: false, data: [] })

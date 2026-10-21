@@ -14,6 +14,9 @@ pub const KEX_ECDH_REPLY: u8 = 31;
 pub const USERAUTH_REQUEST: u8 = 50;
 pub const USERAUTH_FAILURE: u8 = 51;
 pub const USERAUTH_SUCCESS: u8 = 52;
+pub const GLOBAL_REQUEST: u8 = 80;
+pub const REQUEST_SUCCESS: u8 = 81;
+pub const REQUEST_FAILURE: u8 = 82;
 pub const PING: u8 = 192;
 pub const PONG: u8 = 193;
 pub const CHANNEL_OPEN: u8 = 90;
@@ -27,3 +30,20 @@ pub const CHANNEL_CLOSE: u8 = 97;
 pub const CHANNEL_REQUEST: u8 = 98;
 pub const CHANNEL_SUCCESS: u8 = 99;
 pub const CHANNEL_FAILURE: u8 = 100;
+
+/// Whether `n` is a message number this crate decodes.
+pub const fn is_known(n: u8) -> bool {
+    matches!(
+        n,
+        DISCONNECT..=EXT_INFO
+            | KEXINIT
+            | NEWKEYS
+            | KEX_ECDH_INIT
+            | KEX_ECDH_REPLY
+            | USERAUTH_REQUEST..=USERAUTH_SUCCESS
+            | GLOBAL_REQUEST..=REQUEST_FAILURE
+            | CHANNEL_OPEN..=CHANNEL_FAILURE
+            | PING
+            | PONG
+    )
+}
