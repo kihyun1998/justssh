@@ -48,7 +48,7 @@ Both roles offer x/crypto/ssh v0.55's default key exchanges, ciphers and MACs (A
 
 The in-memory tests run justssh against itself. Measured on #10 by mutation: a GCM nonce that does not advance, a GCM tag without the length as associated data, an Encrypt-and-MAC computed over the ciphertext, an EtM MAC without the length, `hmac-sha1-96` sent untruncated, `K` of the hybrid method as an mpint, the wrong hash for `ecdh-sha2-nistp384` or `diffie-hellman-group14-sha1`, and swapped key letters all left the in-memory tests green, and each failed the Go interop test. GCM packets aligned to 8 instead of 16 also pass Go, which does not check, and fail OpenSSH. So the OpenSSH and Go matrices (`openssh.rs`, `sshd.rs`, `go.rs`) are the proof for this layer.
 
-OpenSSH 9.6p1 has no `mlkem768x25519-sha256` (9.9 added it), and its sshd offers neither `diffie-hellman-group14-sha1` nor `hmac-sha1-96` by default: CI adds those two to one sshd and runs Alpine 3.21's OpenSSH 9.9p2 for the hybrid method. An `ssh` client without the hybrid method skips it in `openssh.rs`; the Go tests cover it there.
+The CI sshd is whatever the runner image installs: 9.6p1 on Ubuntu 24.04, 10.2p1 on the runner on #10. Neither offers `diffie-hellman-group14-sha1` or `hmac-sha1-96` by default, and 10.2p1 offers no `diffie-hellman-group14-sha256` either (measured on #10), so CI adds all three to one sshd. 9.6p1 has no `mlkem768x25519-sha256` (9.9 added it), so CI also runs Alpine 3.21's OpenSSH 9.9p2 for the hybrid method. An `ssh` client without the hybrid method skips it in `openssh.rs`; the Go tests cover it there.
 
 ## What the algorithms cost
 

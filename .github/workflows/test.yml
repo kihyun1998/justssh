@@ -51,7 +51,7 @@ jobs:
           UsePAM no
           PasswordAuthentication no
           KbdInteractiveAuthentication no'
-          printf '%s\nPort 2201\nPidFile /run/sshd-password.pid\nPubkeyAuthentication no\nUsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\nClientAliveInterval 1\nClientAliveCountMax 2\nKexAlgorithms +diffie-hellman-group14-sha1\nMACs +hmac-sha1-96\n' "$common" | sudo tee /etc/ssh/justssh-password.conf
+          printf '%s\nPort 2201\nPidFile /run/sshd-password.pid\nPubkeyAuthentication no\nUsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\nClientAliveInterval 1\nClientAliveCountMax 2\nKexAlgorithms +diffie-hellman-group14-sha256,diffie-hellman-group14-sha1\nMACs +hmac-sha1-96\n' "$common" | sudo tee /etc/ssh/justssh-password.conf
           printf '%s\nPort 2202\nPidFile /run/sshd-pam.pid\nPubkeyAuthentication no\nUsePAM yes\nPasswordAuthentication no\nKbdInteractiveAuthentication yes\n' "$common" | sudo tee /etc/ssh/justssh-pam.conf
           printf '%s\n%s\nPort 2204\nPidFile /run/sshd-keys.pid\n' "$common" "$keys" | sudo tee /etc/ssh/justssh-keys.conf
           printf '%s\n%s\nPort 2205\nPidFile /run/sshd-keys-ssh-rsa.pid\nPubkeyAcceptedAlgorithms ssh-rsa,ssh-rsa-cert-v01@openssh.com\n' "$common" "$keys" | sudo tee /etc/ssh/justssh-keys-ssh-rsa.conf
