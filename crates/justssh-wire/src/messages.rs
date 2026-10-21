@@ -177,6 +177,7 @@ pub enum Message {
     UserauthRequest(UserauthRequest),
     UserauthFailure(UserauthFailure),
     UserauthSuccess(UserauthSuccess),
+    UserauthBanner(UserauthBanner),
     Ping(Ping),
     Pong(Pong),
     GlobalRequest(GlobalRequest),
@@ -276,6 +277,11 @@ impl Message {
             }
             Message::UserauthSuccess(_) => {
                 w.u8(number::USERAUTH_SUCCESS);
+            }
+            Message::UserauthBanner(m) => {
+                w.u8(number::USERAUTH_BANNER)
+                    .string(&m.message)
+                    .string(&m.language);
             }
             Message::Ping(m) => {
                 w.u8(number::PING).string(&m.data);
@@ -440,6 +446,10 @@ impl Message {
                 partial_success: r.bool()?,
             }),
             number::USERAUTH_SUCCESS => Message::UserauthSuccess(UserauthSuccess),
+            number::USERAUTH_BANNER => Message::UserauthBanner(UserauthBanner {
+                message: r.string()?.to_vec(),
+                language: r.string()?.to_vec(),
+            }),
             number::PING => Message::Ping(Ping::new(r.string()?.to_vec())),
             number::PONG => Message::Pong(Pong::new(r.string()?.to_vec())),
             number::GLOBAL_REQUEST => {
@@ -590,6 +600,20 @@ impl UserauthFailure {
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UserauthSuccess;
+
+/// `SSH_MSG_USERAUTH_BANNER` (RFC 4252 §5.4), its strings kept as sent.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserauthBanner {
+    pub message: Vec<u8>,
+    pub language: Vec<u8>,
+}
+
+impl UserauthBanner {
+    pub fn new(message: Vec<u8>, language: Vec<u8>) -> Self {
+        UserauthBanner { message, language }
+    }
+}
 
 /// `SSH2_MSG_PING` (OpenSSH PROTOCOL §1.8).
 #[non_exhaustive]

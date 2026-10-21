@@ -26,7 +26,33 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Start sshd for the client tests (crates/justssh-tokio/tests/sshd.rs)
+        run: |
+          if ! command -v sshd >/dev/null; then
+            sudo apt-get update -q && sudo apt-get install -yq openssh-server
+          fi
+          sudo useradd -m justssh
+          echo 'justssh:justssh-ci-only' | sudo chpasswd
+          sudo mkdir -p /run/sshd
+          sudo ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/justssh_host_ed25519
+          common='ListenAddress 127.0.0.1
+          HostKey /etc/ssh/justssh_host_ed25519
+          PubkeyAuthentication no
+          AllowUsers justssh'
+          printf '%s\nPort 2201\nPidFile /run/sshd-password.pid\nUsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\n' "$common" | sudo tee /etc/ssh/justssh-password.conf
+          printf '%s\nPort 2202\nPidFile /run/sshd-pam.pid\nUsePAM yes\nPasswordAuthentication no\nKbdInteractiveAuthentication yes\n' "$common" | sudo tee /etc/ssh/justssh-pam.conf
+          sudo /usr/sbin/sshd -t -f /etc/ssh/justssh-password.conf
+          sudo /usr/sbin/sshd -t -f /etc/ssh/justssh-pam.conf
+          sudo /usr/sbin/sshd -f /etc/ssh/justssh-password.conf
+          sudo /usr/sbin/sshd -f /etc/ssh/justssh-pam.conf
+
       - name: Test
+        env:
+          JUSTSSH_REQUIRE_SSHD: "1"
+          JUSTSSH_SSHD_PASSWORD_ADDR: 127.0.0.1:2201
+          JUSTSSH_SSHD_PAM_ADDR: 127.0.0.1:2202
+          JUSTSSH_SSHD_USER: justssh
+          JUSTSSH_SSHD_SECRET: justssh-ci-only
         run: cargo test --workspace
 
       - name: Rustdoc

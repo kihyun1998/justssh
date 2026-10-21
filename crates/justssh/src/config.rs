@@ -177,18 +177,24 @@ impl ServerConfigBuilder {
 
 /// How a [`Client`](crate::Client) runs.
 pub struct ClientConfig {
+    pub(crate) user: Vec<u8>,
     pub(crate) rng: BoxRng,
     pub(crate) version: String,
 }
 
 impl ClientConfig {
-    pub fn builder() -> ClientConfigBuilder {
-        ClientConfigBuilder { rng: None }
+    /// A builder for a client authenticating as `user`, sent as given.
+    pub fn builder(user: &[u8]) -> ClientConfigBuilder {
+        ClientConfigBuilder {
+            user: user.to_vec(),
+            rng: None,
+        }
     }
 }
 
 /// Builds a [`ClientConfig`].
 pub struct ClientConfigBuilder {
+    user: Vec<u8>,
     rng: Option<BoxRng>,
 }
 
@@ -202,6 +208,7 @@ impl ClientConfigBuilder {
 
     pub fn build(self) -> ClientConfig {
         ClientConfig {
+            user: self.user,
             rng: self.rng.unwrap_or_else(system_rng),
             version: "SSH-2.0-justssh".to_owned(),
         }

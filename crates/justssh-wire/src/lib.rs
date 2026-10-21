@@ -10,6 +10,6 @@ pub use messages::{
     ChannelOpenConfirmation, ChannelOpenFailure, ChannelRequest, ChannelSuccess,
     ChannelWindowAdjust, Debug, Disconnect, ExtInfo, GlobalRequest, Ignore, KexEcdhInit,
     KexEcdhReply, KexInit, Message, NewKeys, Ping, Pong, RequestFailure, RequestSuccess,
-    ServiceAccept, ServiceRequest, Unimplemented, UserauthFailure, UserauthRequest,
+    ServiceAccept, ServiceRequest, Unimplemented, UserauthBanner, UserauthFailure, UserauthRequest,
     UserauthSuccess,
 };

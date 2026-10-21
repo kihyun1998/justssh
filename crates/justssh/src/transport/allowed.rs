@@ -50,6 +50,13 @@ pub(crate) fn verdict(role: Role, stage: Stage, n: u8, strict_initial: bool) -> 
         number::SERVICE_ACCEPT => accept_if(role == Role::Client && stage == Stage::Service),
         number::USERAUTH_REQUEST if role == Role::Server && stage == Stage::Connected => Ignore,
         number::USERAUTH_REQUEST => accept_if(role == Role::Server && stage == Stage::Auth),
+        number::USERAUTH_FAILURE
+        | number::USERAUTH_SUCCESS
+        | number::USERAUTH_BANNER
+        | number::USERAUTH_INFO_REQUEST => accept_if(role == Role::Client && stage == Stage::Auth),
+        number::EXT_INFO => {
+            accept_if(role == Role::Client && matches!(stage, Stage::Service | Stage::Auth))
+        }
         number::PING | number::PONG => accept_if(stage == Stage::Connected),
         number::GLOBAL_REQUEST..=number::REQUEST_FAILURE => accept_if(stage == Stage::Connected),
         number::CHANNEL_OPEN..=number::CHANNEL_FAILURE => accept_if(stage == Stage::Connected),

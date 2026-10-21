@@ -21,6 +21,11 @@ pub enum Event<'a> {
     AuthAccepted,
     /// The consumer rejects the pending [`Action::PasswordRequest`].
     AuthRejected,
+    /// The consumer accepts the host key of the pending [`Action::VerifyHostKey`].
+    HostKeyAccepted,
+    /// The consumer rejects the host key of the pending [`Action::VerifyHostKey`]; the
+    /// connection ends.
+    HostKeyRejected,
     /// A deadline the consumer set for the current phase has passed.
     DeadlineExceeded,
 }
@@ -34,6 +39,22 @@ pub enum Action {
     /// A client asks to authenticate with a password. Nothing further is processed until the
     /// consumer answers with [`Event::AuthAccepted`] or [`Event::AuthRejected`].
     PasswordRequest(PasswordRequest),
+    /// The server's host key blob, its signature over the exchange hash verified. Nothing
+    /// further is processed until the consumer answers with [`Event::HostKeyAccepted`] or
+    /// [`Event::HostKeyRejected`].
+    VerifyHostKey { key: Vec<u8> },
+    /// A message the server shows before authentication completes (RFC 4252 §5.4), as sent and
+    /// unfiltered.
+    AuthBanner { message: Vec<u8> },
+    /// The last authentication attempt did not complete authentication; `methods` may continue.
+    /// With `partial_success` it succeeded, but more is required.
+    AuthFailure {
+        methods: Vec<String>,
+        partial_success: bool,
+    },
+    /// The server asks the keyboard-interactive questions in it; answer with
+    /// [`Client::answer_prompts`](crate::Client::answer_prompts).
+    KeyboardInteractive(InfoRequest),
     /// A global request from the peer, passed through unparsed.
     GlobalRequest(GlobalRequest),
     /// The reply to a global request this side sent with `want_reply`, with everything after
@@ -92,6 +113,50 @@ impl fmt::Debug for PasswordRequest {
             .field("user", &String::from_utf8_lossy(&self.user))
             .field("password", &"<redacted>")
             .finish()
+    }
+}
+
+/// A keyboard-interactive information request (RFC 4256 §3.2), its strings as sent and
+/// unfiltered.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InfoRequest {
+    pub(crate) name: Vec<u8>,
+    pub(crate) instruction: Vec<u8>,
+    pub(crate) prompts: Vec<Prompt>,
+}
+
+impl InfoRequest {
+    pub fn name(&self) -> &[u8] {
+        &self.name
+    }
+
+    pub fn instruction(&self) -> &[u8] {
+        &self.instruction
+    }
+
+    /// The questions, each answered in order; there may be none.
+    pub fn prompts(&self) -> &[Prompt] {
+        &self.prompts
+    }
+}
+
+/// One keyboard-interactive question.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prompt {
+    pub(crate) text: Vec<u8>,
+    pub(crate) echo: bool,
+}
+
+impl Prompt {
+    pub fn text(&self) -> &[u8] {
+        &self.text
+    }
+
+    /// Whether the answer may be shown as it is typed.
+    pub fn echo(&self) -> bool {
+        self.echo
     }
 }
 
@@ -168,7 +233,7 @@ pub enum Phase {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// An [`Event`] arrived that the current state does not take.
+    /// An [`Event`] or command arrived that the current state does not take.
     UnexpectedEvent,
     /// The peer's identification line was too long or named an unsupported protocol version.
     BadVersion,
@@ -192,6 +257,8 @@ pub enum Error {
     KeyExchange,
     /// The server's host key or its signature over the exchange hash did not verify.
     HostKeySignature,
+    /// The consumer rejected the server's host key.
+    HostKeyRejected,
     /// The peer asked for a service other than `ssh-userauth`, or authenticated for one other
     /// than `ssh-connection`.
     ServiceNotAvailable,
@@ -230,6 +297,7 @@ impl fmt::Display for Error {
             }
             Error::KeyExchange => f.write_str("key exchange failed"),
             Error::HostKeySignature => f.write_str("host key signature did not verify"),
+            Error::HostKeyRejected => f.write_str("host key not accepted"),
             Error::ServiceNotAvailable => f.write_str("service not available"),
             Error::TooManyAuthFailures => f.write_str("too many authentication failures"),
             Error::TooManyAuthAttempts => f.write_str("too many authentication attempts"),

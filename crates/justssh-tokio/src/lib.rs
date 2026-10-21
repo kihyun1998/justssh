@@ -1,5 +1,9 @@
 //! Tokio adapter that drives the justssh sans-IO core over TCP.
 
+mod connect;
+
+pub use connect::{AuthMethod, ClientHandler, Connected, connect};
+
 use std::future::Future;
 use std::io;
 use std::time::Duration;
@@ -12,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
 
 /// How long a connection may take to get past each phase, counted from the start of
-/// [`accept`]. A deadline for a phase also bounds every phase before it.
+/// [`accept`] or [`connect`]. A deadline for a phase also bounds every phase before it.
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct Deadlines {

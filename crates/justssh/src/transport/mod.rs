@@ -23,7 +23,8 @@ use crate::handshake::{Handshake, KexInitRecord};
 
 use allowed::{Stage, Verdict};
 use packet::{ChaChaKeys, Cipher, OpenError};
-use userauth::{AfterFailure, ServerAuth};
+pub(crate) use userauth::Method;
+use userauth::{AfterFailure, ClientAuth, ServerAuth};
 use version::{Line, VersionError};
 
 const USERAUTH: &str = "ssh-userauth";
@@ -42,6 +43,12 @@ const SERVER_SIG_ALGS: &str = "ssh-ed25519,sk-ssh-ed25519@openssh.com,\
 pub(crate) enum Role {
     Server,
     Client,
+}
+
+/// A client's key exchange waiting for the consumer's host key verdict.
+struct PendingKex {
+    shared: Zeroizing<[u8; 32]>,
+    h: Vec<u8>,
 }
 
 /// Key exchange state that lives only until `SSH_MSG_NEWKEYS`.
@@ -79,6 +86,11 @@ pub(crate) struct Transport {
     peer_host_key: Option<Vec<u8>>,
     /// The server's authentication state; `None` for a client.
     auth: Option<ServerAuth>,
+    /// The client's authentication state; `None` for a server.
+    client_auth: Option<ClientAuth>,
+    host_key_pending: Option<PendingKex>,
+    /// The extensions of the server's first `SSH_MSG_EXT_INFO`, received by a client.
+    ext_info: Option<Vec<(String, Vec<u8>)>>,
     channels: Channels,
     #[cfg(feature = "test-support")]
     raw_receive: bool,
@@ -86,9 +98,11 @@ pub(crate) struct Transport {
 }
 
 impl Transport {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         role: Role,
         host_key: Option<HostKey>,
+        client_user: Option<Vec<u8>>,
         rng: BoxRng,
         local_version: String,
         max_auth_tries: u32,
@@ -125,6 +139,9 @@ impl Transport {
             session_id: None,
             peer_host_key: None,
             auth: (role == Role::Server).then(|| ServerAuth::new(max_auth_tries)),
+            client_auth: client_user.map(ClientAuth::new),
+            host_key_pending: None,
+            ext_info: None,
             channels: Channels::new(channel_window, channel_max_packet),
             #[cfg(feature = "test-support")]
             raw_receive: false,
@@ -162,6 +179,14 @@ impl Transport {
         self.peer_host_key.as_deref()
     }
 
+    pub(crate) fn ext_info(&self, name: &str) -> Option<&[u8]> {
+        self.ext_info
+            .as_ref()?
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_slice())
+    }
+
     pub(crate) fn process(&mut self, event: Event<'_>) -> Vec<Action> {
         if self.phase == Phase::Closed {
             return Vec::new();
@@ -174,7 +199,7 @@ impl Transport {
             }
             Event::Received(bytes) if self.started => {
                 self.inbuf.extend_from_slice(bytes);
-                if self.auth_pending() && self.inbuf.len() > PENDING_INPUT {
+                if self.waiting() && self.inbuf.len() > PENDING_INPUT {
                     self.fail(DisconnectReason::PROTOCOL_ERROR, Error::InputOverflow);
                 } else {
                     self.drain();
@@ -191,6 +216,18 @@ impl Transport {
                 self.end_pending();
                 self.auth_failed("password");
                 self.drain();
+            }
+            Event::HostKeyAccepted if self.host_key_pending.is_some() => {
+                let pending = self.host_key_pending.take().expect("checked");
+                self.finish_exchange(&*pending.shared, &pending.h);
+                self.drain();
+            }
+            Event::HostKeyRejected if self.host_key_pending.is_some() => {
+                self.host_key_pending = None;
+                self.fail(
+                    DisconnectReason::HOST_KEY_NOT_VERIFIABLE,
+                    Error::HostKeyRejected,
+                );
             }
             Event::DeadlineExceeded if self.started => {
                 self.fail(DisconnectReason::BY_APPLICATION, Error::DeadlineExceeded)
@@ -230,6 +267,51 @@ impl Transport {
 
     fn auth_pending(&self) -> bool {
         self.auth.as_ref().is_some_and(|a| a.pending)
+    }
+
+    /// Whether received input waits for a verdict from the consumer.
+    fn waiting(&self) -> bool {
+        self.auth_pending() || self.host_key_pending.is_some()
+    }
+
+    /// Sends a client authentication request for `method`.
+    pub(crate) fn client_attempt(&mut self, method: Method, password: &[u8]) -> Vec<Action> {
+        if self.phase == Phase::Closed {
+            return Vec::new();
+        }
+        let stage = self.stage;
+        let Some(auth) = self
+            .client_auth
+            .as_mut()
+            .filter(|a| a.attempt.is_none() && stage == Stage::Auth)
+        else {
+            self.fail(DisconnectReason::PROTOCOL_ERROR, Error::UnexpectedEvent);
+            return std::mem::take(&mut self.actions);
+        };
+        auth.attempt = Some(method);
+        auth.ext_info = false;
+        let payload = userauth::client_request(&auth.user, method, password);
+        self.send_payload(&payload);
+        std::mem::take(&mut self.actions)
+    }
+
+    /// Answers the outstanding keyboard-interactive questions.
+    pub(crate) fn answer_prompts(&mut self, answers: &[Zeroizing<Vec<u8>>]) -> Vec<Action> {
+        if self.phase == Phase::Closed {
+            return Vec::new();
+        }
+        let Some(auth) = self
+            .client_auth
+            .as_mut()
+            .filter(|a| a.questions == Some(answers.len()))
+        else {
+            self.fail(DisconnectReason::PROTOCOL_ERROR, Error::UnexpectedEvent);
+            return std::mem::take(&mut self.actions);
+        };
+        auth.questions = None;
+        let payload = userauth::info_response(answers);
+        self.send_payload(&payload);
+        std::mem::take(&mut self.actions)
     }
 
     fn end_pending(&mut self) {
@@ -314,7 +396,7 @@ impl Transport {
 
     /// Handles everything complete in `inbuf[*consumed..]`, advancing `consumed` past it.
     fn drain_from(&mut self, consumed: &mut usize) {
-        while self.phase != Phase::Closed && !self.auth_pending() {
+        while self.phase != Phase::Closed && !self.waiting() {
             if !self.version_done {
                 match version::take_line(&mut self.inbuf, &mut self.version_budget) {
                     Ok(Line::Incomplete) => return,
@@ -372,6 +454,9 @@ impl Transport {
         self.rng.fill_bytes(&mut k.cookie);
         let names = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         k.kex_algorithms = names(negotiate::KEX);
+        if self.role == Role::Client && self.session_id.is_none() {
+            k.kex_algorithms.push(negotiate::EXT_INFO_CLIENT.to_owned());
+        }
         k.kex_algorithms.push(
             match self.role {
                 Role::Server => negotiate::STRICT_SERVER,
@@ -425,6 +510,9 @@ impl Transport {
         if n == number::USERAUTH_REQUEST {
             return self.on_userauth_request(payload);
         }
+        if n == number::USERAUTH_INFO_REQUEST {
+            return self.on_info_request(payload);
+        }
         let message = match Message::decode(payload) {
             Ok(m) => m,
             Err(e) => return self.fail(DisconnectReason::PROTOCOL_ERROR, Error::Decode(e)),
@@ -464,6 +552,12 @@ impl Transport {
             Message::NewKeys(_) => self.on_newkeys(),
             Message::ServiceRequest(r) => self.on_service_request(&r.service),
             Message::ServiceAccept(a) => self.on_service_accept(&a.service),
+            Message::ExtInfo(e) => self.on_ext_info(e.extensions),
+            Message::UserauthFailure(f) => self.on_userauth_failure(f.methods, f.partial_success),
+            Message::UserauthSuccess(_) => self.on_userauth_success(),
+            Message::UserauthBanner(b) => {
+                self.actions.push(Action::AuthBanner { message: b.message })
+            }
             _ => self.fail(
                 DisconnectReason::PROTOCOL_ERROR,
                 Error::UnexpectedMessage { number: n },
@@ -573,7 +667,10 @@ impl Transport {
             );
         }
         self.peer_host_key = Some(reply.host_key.clone());
-        self.finish_exchange(&*shared, &h);
+        self.host_key_pending = Some(PendingKex { shared, h });
+        self.actions.push(Action::VerifyHostKey {
+            key: reply.host_key.clone(),
+        });
     }
 
     fn verify_host_signature(&self, blob: &[u8], signature: &[u8], h: &[u8]) -> bool {
@@ -731,6 +828,78 @@ impl Transport {
         )));
         if let AfterFailure::FailureThenTooManyAttempts = after {
             self.fail(DisconnectReason::PROTOCOL_ERROR, Error::TooManyAuthAttempts);
+        }
+    }
+
+    /// Ends the connection over message `n`, which the client's authentication state does not
+    /// take.
+    fn unexpected(&mut self, n: u8) {
+        self.fail(
+            DisconnectReason::PROTOCOL_ERROR,
+            Error::UnexpectedMessage { number: n },
+        );
+    }
+
+    fn on_ext_info(&mut self, extensions: Vec<(String, Vec<u8>)>) {
+        if self.stage == Stage::Service {
+            if self.ext_info.is_some() {
+                return self.unexpected(number::EXT_INFO);
+            }
+            self.ext_info = Some(extensions);
+            return;
+        }
+        match self.client_auth.as_mut() {
+            Some(a) if a.attempt.is_some() && !a.ext_info => a.ext_info = true,
+            _ => self.unexpected(number::EXT_INFO),
+        }
+    }
+
+    fn on_userauth_failure(&mut self, methods: Vec<String>, partial_success: bool) {
+        let Some(auth) = self.client_auth.as_mut().filter(|a| a.attempt.is_some()) else {
+            return self.unexpected(number::USERAUTH_FAILURE);
+        };
+        auth.attempt = None;
+        auth.questions = None;
+        auth.methods = methods.clone();
+        self.actions.push(Action::AuthFailure {
+            methods,
+            partial_success,
+        });
+    }
+
+    fn on_userauth_success(&mut self) {
+        let Some(auth) = self.client_auth.as_mut().filter(|a| a.attempt.is_some()) else {
+            return self.unexpected(number::USERAUTH_SUCCESS);
+        };
+        auth.attempt = None;
+        auth.questions = None;
+        self.stage = Stage::Connected;
+        self.phase = Phase::Connected;
+    }
+
+    /// `SSH_MSG_USERAUTH_INFO_REQUEST` under keyboard-interactive, or
+    /// `SSH_MSG_USERAUTH_PASSWD_CHANGEREQ` under password, which share a number.
+    fn on_info_request(&mut self, payload: &[u8]) {
+        let Some(auth) = self.client_auth.as_mut() else {
+            return self.unexpected(number::USERAUTH_INFO_REQUEST);
+        };
+        match (auth.attempt, auth.questions) {
+            (Some(Method::Password), _) => {
+                auth.attempt = None;
+                let methods = auth.methods.clone();
+                self.actions.push(Action::AuthFailure {
+                    methods,
+                    partial_success: false,
+                });
+            }
+            (Some(Method::KeyboardInteractive), None) => match userauth::info_request(payload) {
+                Ok(request) => {
+                    auth.questions = Some(request.prompts.len());
+                    self.actions.push(Action::KeyboardInteractive(request));
+                }
+                Err(e) => self.fail(DisconnectReason::PROTOCOL_ERROR, Error::Decode(e)),
+            },
+            _ => self.unexpected(number::USERAUTH_INFO_REQUEST),
         }
     }
 
