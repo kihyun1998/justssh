@@ -187,6 +187,20 @@ fn connected_closed(connected: Connected<tokio::io::DuplexStream>) -> Closed {
     }
 }
 
+/// A request's method, and for `publickey` whether it is a query or signed and its algorithm.
+fn describe(method: &str, data: &[u8]) -> String {
+    if method != "publickey" {
+        return method.to_owned();
+    }
+    let mut r = justssh_wire::Reader::new(data);
+    let signed = r.bool().unwrap();
+    let algorithm = r.utf8().unwrap();
+    format!(
+        "publickey {} {algorithm}",
+        if signed { "signed" } else { "query" }
+    )
+}
+
 /// A server that answers the `n`th authentication request with the payloads of `replies[n]`,
 /// raw and in one write, and returns the authentication methods it was asked for.
 async fn raw_server(mut io: DuplexStream, replies: Vec<Vec<Vec<u8>>>) -> Vec<String> {
@@ -204,7 +218,7 @@ async fn raw_server(mut io: DuplexStream, replies: Vec<Vec<Vec<u8>>>) -> Vec<Str
                     let Ok(Message::UserauthRequest(r)) = Message::decode(&p) else {
                         continue;
                     };
-                    methods.push(r.method);
+                    methods.push(describe(&r.method, &r.method_data));
                     if let Some(reply) = replies.next() {
                         let mut out = Vec::new();
                         for payload in reply {
@@ -521,4 +535,229 @@ async fn a_client_session_and_a_server_session_carry_an_exec_both_ways() {
         (kind.as_str(), data.as_slice()),
         ("exec", &b"\0\0\0\x02id"[..])
     );
+}
+
+#[path = "../../justssh/tests/common/test_keys.rs"]
+mod test_keys;
+
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+fn rsa_key() -> justssh::PrivateKey {
+    justssh::PrivateKey::rsa(
+        &hex(test_keys::RSA_N),
+        &hex(test_keys::RSA_E),
+        Zeroizing::new(hex(test_keys::RSA_D)),
+        Zeroizing::new(hex(test_keys::RSA_P)),
+        Zeroizing::new(hex(test_keys::RSA_Q)),
+    )
+    .unwrap()
+}
+
+fn ed25519_key(seed: u8) -> justssh::PrivateKey {
+    justssh::PrivateKey::ed25519(Zeroizing::new([seed; 32]))
+}
+
+/// An OpenSSH certificate of `cert_type` for the key in `plain_blob`; its signature is not
+/// checked here.
+fn certificate(cert_type: &str, plain_blob: &[u8]) -> Vec<u8> {
+    let mut plain = justssh_wire::Reader::new(plain_blob);
+    plain.utf8().unwrap();
+    let mut w = Writer::new();
+    w.string(cert_type.as_bytes()).string(b"nonce");
+    w.bytes(plain.remaining());
+    w.bytes(&[0; 8])
+        .u32(1)
+        .string(b"id")
+        .string(b"")
+        .bytes(&[0; 8])
+        .bytes(&[0xff; 8]);
+    w.string(b"")
+        .string(b"")
+        .string(b"")
+        .string(b"ca")
+        .string(b"sig");
+    w.into_bytes()
+}
+
+fn pk_ok(algorithm: &str, blob: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u8(number::USERAUTH_PK_OK)
+        .string(algorithm.as_bytes())
+        .string(blob);
+    w.into_bytes()
+}
+
+#[tokio::test]
+async fn keys_are_offered_in_turn_until_one_is_accepted() {
+    let (first, second) = (ed25519_key(1), ed25519_key(2));
+    let (connected, asked) = against_raw_asked(
+        &[AuthMethod::PublicKeys(vec![first, second.clone()])],
+        vec![
+            vec![auth_failure(&["publickey"])],
+            vec![auth_failure(&["publickey"])],
+            vec![pk_ok("ssh-ed25519", &second.public_blob())],
+            vec![auth_success()],
+        ],
+    )
+    .await;
+    assert!(
+        matches!(connected, Connected::Authenticated { .. }),
+        "{connected:?}"
+    );
+    assert_eq!(
+        asked,
+        [
+            "none",
+            "publickey query ssh-ed25519",
+            "publickey query ssh-ed25519",
+            "publickey signed ssh-ed25519",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_rsa_certificate_refused_under_rsa_sha2_is_offered_again_as_ssh_rsa_cert() {
+    let key = rsa_key();
+    let cert = certificate("ssh-rsa-cert-v01@openssh.com", &key.public_blob());
+    let key = key.with_certificate(cert.clone()).unwrap();
+    let (connected, asked) = against_raw_asked(
+        &[AuthMethod::PublicKeys(vec![key])],
+        vec![
+            vec![auth_failure(&["publickey"])],
+            vec![auth_failure(&["publickey"])],
+            vec![pk_ok("ssh-rsa-cert-v01@openssh.com", &cert)],
+            vec![auth_success()],
+        ],
+    )
+    .await;
+    assert!(
+        matches!(connected, Connected::Authenticated { .. }),
+        "{connected:?}"
+    );
+    assert_eq!(
+        asked,
+        [
+            "none",
+            "publickey query rsa-sha2-256-cert-v01@openssh.com",
+            "publickey query ssh-rsa-cert-v01@openssh.com",
+            "publickey signed ssh-rsa-cert-v01@openssh.com",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_signed_key_refused_without_publickey_left_moves_to_the_next_method() {
+    let (first, second) = (ed25519_key(1), ed25519_key(2));
+    let (connected, asked) = against_raw_asked(
+        &[
+            AuthMethod::PublicKeys(vec![first.clone(), second]),
+            password(b"pw"),
+        ],
+        vec![
+            vec![auth_failure(&["publickey", "password"])],
+            vec![pk_ok("ssh-ed25519", &first.public_blob())],
+            vec![auth_failure(&["password"])],
+            vec![auth_success()],
+        ],
+    )
+    .await;
+    assert!(
+        matches!(connected, Connected::Authenticated { .. }),
+        "{connected:?}"
+    );
+    assert_eq!(
+        asked,
+        [
+            "none",
+            "publickey query ssh-ed25519",
+            "publickey signed ssh-ed25519",
+            "password",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn when_every_key_is_refused_the_next_method_is_tried() {
+    let (first, second) = (ed25519_key(1), ed25519_key(2));
+    let (connected, asked) = against_raw_asked(
+        &[AuthMethod::PublicKeys(vec![first, second]), password(b"pw")],
+        vec![
+            vec![auth_failure(&["publickey", "password"])],
+            vec![auth_failure(&["publickey", "password"])],
+            vec![auth_failure(&["publickey", "password"])],
+            vec![auth_success()],
+        ],
+    )
+    .await;
+    assert!(
+        matches!(connected, Connected::Authenticated { .. }),
+        "{connected:?}"
+    );
+    assert_eq!(
+        asked,
+        [
+            "none",
+            "publickey query ssh-ed25519",
+            "publickey query ssh-ed25519",
+            "password",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_empty_key_list_is_passed_over() {
+    let (connected, asked) = against_raw_asked(
+        &[AuthMethod::PublicKeys(Vec::new()), password(b"pw")],
+        vec![
+            vec![auth_failure(&["publickey", "password"])],
+            vec![auth_success()],
+        ],
+    )
+    .await;
+    assert!(
+        matches!(connected, Connected::Authenticated { .. }),
+        "{connected:?}"
+    );
+    assert_eq!(asked, ["none", "password"]);
+}
+
+/// [`against_raw`] for a connection that authenticates: the server is asked to stop once the
+/// client is in, and what it was asked comes back.
+async fn against_raw_asked(
+    methods: &[AuthMethod],
+    replies: Vec<Vec<Vec<u8>>>,
+) -> (Connected<DuplexStream>, Vec<String>) {
+    let (server_io, client_io) = tokio::io::duplex(1 << 16);
+    let server = tokio::spawn(raw_server(server_io, replies));
+    let mut client = Client::new(ClientConfig::builder(b"alice").build());
+    let connected = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        justssh_tokio::connect(
+            client_io,
+            &mut client,
+            &Deadlines::new(),
+            methods,
+            &mut Handler::accepting(),
+        ),
+    )
+    .await
+    .expect("connect is still waiting")
+    .unwrap();
+    let connected = match connected {
+        Connected::Authenticated { io, events } => {
+            drop(io);
+            Connected::Authenticated {
+                io: tokio::io::duplex(1).0,
+                events,
+            }
+        }
+        other => other,
+    };
+    let asked = server.await.unwrap();
+    (connected, asked)
 }

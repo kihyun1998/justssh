@@ -34,6 +34,10 @@ p521 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 ml-kem = "0.3"
 crypto-bigint = "0.7"
 rsa = "0.9"
+# The digest 0.10 generation rsa 0.9 signs with; used only by RSA signing (ADR-0004).
+rsa-sha1 = { package = "sha1", version = "0.10", features = ["oid"] }
+rsa-sha2 = { package = "sha2", version = "0.10", features = ["oid"] }
+rsa-rand-core = { package = "rand_core", version = "0.6" }
 rand_core = "0.10"
 getrandom = "0.4"
 subtle = "2"

@@ -20,11 +20,12 @@ use crate::config::{BoxRng, HostKey};
 use crate::connection::{ChannelId, ChannelInfo, Channels, Step};
 use crate::event::{Action, Closed, DisconnectReason, Error, Event, PasswordRequest, Phase};
 use crate::handshake::{Handshake, KexInitRecord};
+use crate::key::PrivateKey;
 
 use allowed::{Stage, Verdict};
 use packet::{ChaChaKeys, Cipher, OpenError};
 pub(crate) use userauth::Method;
-use userauth::{AfterFailure, ClientAuth, ServerAuth};
+use userauth::{AfterFailure, ClientAuth, KeyAttempt, ServerAuth};
 use version::{Line, VersionError};
 
 const USERAUTH: &str = "ssh-userauth";
@@ -89,6 +90,8 @@ pub(crate) struct Transport {
     /// The client's authentication state; `None` for a server.
     client_auth: Option<ClientAuth>,
     host_key_pending: Option<PendingKex>,
+    /// Whether a server answers `ext-info-c` with `SSH_MSG_EXT_INFO`.
+    send_ext_info: bool,
     /// The extensions of the server's first `SSH_MSG_EXT_INFO`, received by a client.
     ext_info: Option<Vec<(String, Vec<u8>)>>,
     channels: Channels,
@@ -141,6 +144,7 @@ impl Transport {
             auth: (role == Role::Server).then(|| ServerAuth::new(max_auth_tries)),
             client_auth: client_user.map(ClientAuth::new),
             host_key_pending: None,
+            send_ext_info: true,
             ext_info: None,
             channels: Channels::new(channel_window, channel_max_packet),
             #[cfg(feature = "test-support")]
@@ -163,6 +167,10 @@ impl Transport {
         self.raw_receive = raw;
     }
 
+    pub(crate) fn set_send_ext_info(&mut self, send: bool) {
+        self.send_ext_info = send;
+    }
+
     pub(crate) fn phase(&self) -> Phase {
         self.phase
     }
@@ -177,6 +185,12 @@ impl Transport {
 
     pub(crate) fn peer_host_key(&self) -> Option<&[u8]> {
         self.peer_host_key.as_deref()
+    }
+
+    /// The names in the server's `server-sig-algs` extension, if it sent one.
+    pub(crate) fn server_sig_algs(&self) -> Option<Vec<&str>> {
+        let value = core::str::from_utf8(self.ext_info("server-sig-algs")?).ok()?;
+        Some(value.split(',').filter(|n| !n.is_empty()).collect())
     }
 
     pub(crate) fn ext_info(&self, name: &str) -> Option<&[u8]> {
@@ -306,6 +320,42 @@ impl Transport {
         auth.attempt = Some(method);
         auth.ext_info = false;
         let payload = userauth::client_request(&auth.user, method, password);
+        self.send_payload(&payload);
+        std::mem::take(&mut self.actions)
+    }
+
+    /// Sends a `publickey` query for `key` under `algorithm`, or the algorithm the server's
+    /// `server-sig-algs` leads to; the signed request follows the server's `PK_OK`.
+    pub(crate) fn client_publickey(
+        &mut self,
+        key: &PrivateKey,
+        algorithm: Option<&str>,
+    ) -> Vec<Action> {
+        if self.phase == Phase::Closed {
+            return Vec::new();
+        }
+        let algorithm = match algorithm {
+            None => Some(key.algorithm_for(self.server_sig_algs().as_deref())),
+            Some(a) => key.algorithms().iter().find(|k| **k == a).copied(),
+        };
+        let stage = self.stage;
+        let (Some(algorithm), Some(auth)) = (
+            algorithm,
+            self.client_auth
+                .as_mut()
+                .filter(|a| a.attempt.is_none() && stage == Stage::Auth),
+        ) else {
+            self.fail(DisconnectReason::PROTOCOL_ERROR, Error::UnexpectedEvent);
+            return std::mem::take(&mut self.actions);
+        };
+        auth.attempt = Some(Method::PublicKey);
+        auth.ext_info = false;
+        let payload = userauth::publickey_request(&auth.user, algorithm, &key.public_blob(), None);
+        auth.key = Some(KeyAttempt {
+            key: key.clone(),
+            algorithm,
+            signed: false,
+        });
         self.send_payload(&payload);
         std::mem::take(&mut self.actions)
     }
@@ -775,7 +825,11 @@ impl Transport {
             e.incoming = Some(Cipher::ChaCha(ChaChaKeys::from_material(&incoming)));
         }
         self.stage = Stage::NewKeys;
-        if first && self.role == Role::Server && self.peer_offered("ext-info-c") {
+        if first
+            && self.role == Role::Server
+            && self.send_ext_info
+            && self.peer_offered("ext-info-c")
+        {
             self.send(&Message::ExtInfo(ExtInfo::new(vec![
                 (
                     "server-sig-algs".to_owned(),
@@ -875,10 +929,15 @@ impl Transport {
         };
         auth.attempt = None;
         auth.questions = None;
+        let queried = auth.key.take().is_some_and(|k| !k.signed);
         auth.methods = methods.clone();
-        self.actions.push(Action::AuthFailure {
-            methods,
-            partial_success,
+        self.actions.push(if queried {
+            Action::PublicKeyRefused { methods }
+        } else {
+            Action::AuthFailure {
+                methods,
+                partial_success,
+            }
         });
     }
 
@@ -888,17 +947,20 @@ impl Transport {
         };
         auth.attempt = None;
         auth.questions = None;
+        auth.key = None;
         self.stage = Stage::Connected;
         self.phase = Phase::Connected;
     }
 
-    /// `SSH_MSG_USERAUTH_INFO_REQUEST` under keyboard-interactive, or
-    /// `SSH_MSG_USERAUTH_PASSWD_CHANGEREQ` under password, which share a number.
+    /// `SSH_MSG_USERAUTH_INFO_REQUEST` under keyboard-interactive,
+    /// `SSH_MSG_USERAUTH_PASSWD_CHANGEREQ` under password and `SSH_MSG_USERAUTH_PK_OK` under
+    /// publickey, which share a number.
     fn on_info_request(&mut self, payload: &[u8]) {
         let Some(auth) = self.client_auth.as_mut() else {
             return self.unexpected(number::USERAUTH_INFO_REQUEST);
         };
         match (auth.attempt, auth.questions) {
+            (Some(Method::PublicKey), _) => self.on_pk_ok(payload),
             (Some(Method::Password), _) => {
                 auth.attempt = None;
                 let methods = auth.methods.clone();
@@ -916,6 +978,40 @@ impl Transport {
             },
             _ => self.unexpected(number::USERAUTH_INFO_REQUEST),
         }
+    }
+
+    /// Signs and sends the request the server accepted the key of, or takes a `PK_OK` for
+    /// another key or algorithm as a refusal.
+    fn on_pk_ok(&mut self, payload: &[u8]) {
+        let (algorithm, blob) = match userauth::pk_ok(payload) {
+            Ok(ok) => ok,
+            Err(e) => return self.fail(DisconnectReason::PROTOCOL_ERROR, Error::Decode(e)),
+        };
+        let session_id = self
+            .session_id
+            .clone()
+            .expect("authentication follows the first key exchange");
+        let Some(auth) = self.client_auth.as_mut() else {
+            return;
+        };
+        let Some(attempt) = auth.key.as_mut().filter(|k| !k.signed) else {
+            return self.unexpected(number::USERAUTH_INFO_REQUEST);
+        };
+        let public = attempt.key.public_blob();
+        if !attempt.key.algorithms().contains(&algorithm) || blob != public {
+            auth.attempt = None;
+            auth.key = None;
+            let methods = auth.methods.clone();
+            self.actions.push(Action::PublicKeyRefused { methods });
+            return;
+        }
+        attempt.signed = true;
+        let data =
+            userauth::publickey_signed_data(&session_id, &auth.user, attempt.algorithm, &public);
+        let signature = attempt.key.sign(attempt.algorithm, &data, &mut *self.rng);
+        let request =
+            userauth::publickey_request(&auth.user, attempt.algorithm, &public, Some(&signature));
+        self.send_payload(&request);
     }
 
     fn on_newkeys(&mut self) {

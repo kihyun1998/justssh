@@ -24,6 +24,9 @@ p521.workspace = true
 ml-kem.workspace = true
 crypto-bigint.workspace = true
 rsa.workspace = true
+rsa-sha1.workspace = true
+rsa-sha2.workspace = true
+rsa-rand-core.workspace = true
 rand_core.workspace = true
 getrandom = { workspace = true, features = ["sys_rng"] }
 subtle.workspace = true

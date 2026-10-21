@@ -12,7 +12,8 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
-        Server {
+        let send_ext_info = config.send_ext_info;
+        let mut server = Server {
             transport: Transport::new(
                 Role::Server,
                 Some(config.host_key),
@@ -23,7 +24,9 @@ impl Server {
                 config.channel_window,
                 config.channel_max_packet,
             ),
-        }
+        };
+        server.transport.set_send_ext_info(send_ext_info);
+        server
     }
 
     /// Sends `payload` as one packet, whatever it holds. For tests and fuzzing.

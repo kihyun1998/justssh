@@ -6,6 +6,7 @@ mod connection;
 mod endpoint;
 mod event;
 mod handshake;
+mod key;
 mod server;
 mod transport;
 
@@ -20,6 +21,7 @@ pub use event::{
     Action, Closed, DisconnectReason, Error, Event, InfoRequest, PasswordRequest, Phase, Prompt,
 };
 pub use handshake::{AlgorithmCategory, Algorithms, Handshake, KexInitRecord};
+pub use key::{EcdsaCurve, KeyError, PrivateKey};
 pub use rand_core;
 pub use server::Server;
 pub use zeroize::Zeroizing;
