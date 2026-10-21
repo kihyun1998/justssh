@@ -1,7 +1,7 @@
 use justssh_wire::{
     Debug, Disconnect, ExtInfo, Ignore, KexEcdhInit, KexEcdhReply, KexInit, Message, NewKeys, Ping,
-    Pong, ServiceAccept, ServiceRequest, Unimplemented, UserauthFailure, UserauthRequest,
-    UserauthSuccess,
+    Pong, ServiceAccept, ServiceRequest, Unimplemented, UserauthBanner, UserauthFailure,
+    UserauthRequest, UserauthSuccess,
 };
 use proptest::prelude::*;
 
@@ -65,6 +65,7 @@ fn message() -> impl Strategy<Value = Message> {
         (names(), any::<bool>())
             .prop_map(|(m, p)| Message::UserauthFailure(UserauthFailure::new(m, p))),
         Just(Message::UserauthSuccess(UserauthSuccess::default())),
+        (bytes(), bytes()).prop_map(|(m, l)| Message::UserauthBanner(UserauthBanner::new(m, l))),
         bytes().prop_map(|d| Message::Ping(Ping::new(d))),
         bytes().prop_map(|d| Message::Pong(Pong::new(d))),
     ]
@@ -168,4 +169,18 @@ fn a_userauth_request_does_not_show_its_method_data_in_debug_output() {
         !shown.contains("hunter") && !shown.contains("104, 117"),
         "{shown}"
     );
+}
+
+#[test]
+fn a_banner_keeps_its_message_bytes_whatever_they_hold() {
+    // RFC 4252 §5.4: byte 53, string message, string language tag.
+    let mut payload = vec![53u8, 0, 0, 0, 4];
+    payload.extend(b"hi\xff\n");
+    payload.extend([0, 0, 0, 0]);
+    let m = Message::decode(&payload).unwrap();
+    assert_eq!(
+        m,
+        Message::UserauthBanner(UserauthBanner::new(b"hi\xff\n".to_vec(), Vec::new()))
+    );
+    assert_eq!(m.encode(), payload);
 }

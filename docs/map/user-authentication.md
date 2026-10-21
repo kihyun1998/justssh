@@ -1,6 +1,6 @@
-# User authentication (server)
+# User authentication
 
-How the server side of RFC 4252 is counted and paced (`crates/justssh/src/transport/userauth.rs`, `transport/mod.rs`), and what to watch when changing it.
+How the server side of RFC 4252 is counted and paced, and how the client side asks (`crates/justssh/src/transport/userauth.rs`, `transport/mod.rs`, `crates/justssh-tokio/src/connect.rs`), and what to watch when changing them.
 
 ## Counting follows x/crypto/ssh, line for line
 
@@ -33,3 +33,39 @@ A `password` request whose first byte is `TRUE` asks to change the password (RFC
 ## A verdict answers whatever request is pending
 
 `Event::AuthAccepted` and `AuthRejected` carry no reference to the request they answer; they apply to the one pending. A consumer of the bare core that answers late or twice could accept a request it never checked. `justssh_tokio::accept` answers one request at a time, and with a limit of one failure the first rejection ends the connection, so neither path reaches it. The maintainer chose to leave it on #4.
+
+## The client core makes one attempt at a time; the adapter picks the method
+
+`Client::auth_none`, `auth_password` and `auth_keyboard_interactive` each send one request, and the answer comes back as `Action::AuthFailure` or as the phase becoming `Connected`. Which method to try next is x/crypto/ssh's loop (`client_auth.go` `clientAuthenticate`), and it lives in `justssh_tokio::connect`: `none` first, then the configured methods in order, only those the last failure named, never one whose name has already failed, at most 64 attempts. A method is identified by its name, so two `Password` entries give one try, as two `ssh.Password` do in Go. The core holds no password: each is taken for the one request that sends it.
+
+A failure read in the same batch as keyboard-interactive questions cancels them: the core has already dropped them, and answering would end the connection. Answers of the wrong number, or a malformed `INFO_REQUEST`, end the connection, where x/crypto/ssh fails that method and tries the next (`client_auth.go` `clientAuthenticate`); the broker's handler always answers every question, so it cannot reach either.
+
+Running out of methods returns `Connected::NoMethodLeft` with the methods tried and the last ones the server allowed, after sending `SSH_MSG_DISCONNECT` reason 14; x/crypto/ssh's error carries the same lists ("attempted methods [none], no supported methods remain"), and acwbroker diagnosed its PAM-only nodes from that text (`ssh_dialer.go`).
+
+## A deadline ends connect even when the peer reads nothing
+
+A deadline stays in force after the core has closed, so the `SSH_MSG_DISCONNECT` that a passed deadline produces is written under it too; a write that does not finish in time ends `connect` with the `Closed` it already has, without trying the write again. Both are tested with a pipe the peer never reads. `justssh_tokio::accept` writes the same way but drops the `Closed` and writes the `DISCONNECT` with no deadline.
+
+## The host key is judged before NEWKEYS
+
+After the server's signature over the exchange hash verifies, the client emits `Action::VerifyHostKey` and processes nothing more until `Event::HostKeyAccepted` or `HostKeyRejected`; its `SSH_MSG_NEWKEYS` waits for the verdict. This is where x/crypto/ssh calls `HostKeyCallback` (`handshake.go` `client`), on every key exchange, rekeys included (#12). A rejection disconnects with reason 9.
+
+## Message 60 is read by the method in progress
+
+Under keyboard-interactive it is `SSH_MSG_USERAUTH_INFO_REQUEST`; under password it is `SSH_MSG_USERAUTH_PASSWD_CHANGEREQ`, which counts as a failure of that attempt with the methods of the last failure, as x/crypto/ssh's `handleAuthResponse` fails it and moves on. It is read in the transport, not by `justssh_wire::Message`, and `number::is_known` leaves it out, so once authenticated a 60 is answered with `SSH_MSG_UNIMPLEMENTED`.
+
+## One EXT_INFO per attempt is passed over
+
+The server's `SSH_MSG_EXT_INFO` before `SSH_MSG_SERVICE_ACCEPT` is kept and read by `Client::server_sig_algs`; a second one there ends the connection, as it breaks x/crypto/ssh's `serviceAccept` decode (`client_auth.go` 44–70). During authentication one per attempt is ignored and a second ends the connection, as x/crypto/ssh's `gotMsgExtInfo`.
+
+The extensions are kept for the whole connection, where x/crypto/ssh frees its map when authentication ends. Measured on #7: one packet of 29,107 one-byte names keeps 1.86 MB (a single 262 KB value keeps 523 KB). The last failure's method list is kept too, for a password change request to report; one failure of 131k one-byte names costs 28.8 ms and keeps about 3.3 MB until the next replaces it, and the 64-attempt cap bounds a hostile server to about 2.3 s of CPU per connection. `ext-info-c` is offered only in the first key exchange, before the strict KEX marker, in Go's order (`handshake.go` `sendKexInit`).
+
+## Secrets leave in one allocation
+
+A password request and a keyboard-interactive response are written into a zeroizing buffer of their final size (`SecretPayload`), so growing leaves no copy, and `Cipher::seal` encrypts that payload's copy in place. Banners, prompt texts, names and instructions are kept as bytes, unfiltered: a server can put terminal escapes in them, which OpenSSH strips (`stravis`) and x/crypto/ssh does not. x/crypto/ssh turns them into Go strings, which never fail.
+
+Nothing bounds the keyboard-interactive rounds of one attempt: a server may send `INFO_REQUEST` after every answer, and the broker answers each prompt with the password. One request of 256 KiB holds about 52k empty prompts, parsed in 2 ms with a 2.6 MB peak (measured on #7). x/crypto/ssh loops the same way; only a deadline on `Phase::Auth` ends it.
+
+## The real sshd tests run only in CI
+
+`crates/justssh-tokio/tests/sshd.rs` logs in to two OpenSSH servers CI starts with sudo: one with `PasswordAuthentication yes`, one with only keyboard-interactive through PAM, which is the case the broker's second method exists for. Locally they are skipped unless the variables are set; `JUSTSSH_REQUIRE_SSHD` turns a skip into a failure so CI cannot pass them silently. Running sshd needs root to read passwords, so a local run needs an sshd and an account of one's own.

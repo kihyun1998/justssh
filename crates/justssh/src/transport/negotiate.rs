@@ -7,6 +7,7 @@ use crate::handshake::{AlgorithmCategory, Algorithms};
 
 pub(crate) const STRICT_CLIENT: &str = "kex-strict-c-v00@openssh.com";
 pub(crate) const STRICT_SERVER: &str = "kex-strict-s-v00@openssh.com";
+pub(crate) const EXT_INFO_CLIENT: &str = "ext-info-c";
 
 pub(crate) const KEX: &[&str] = &["curve25519-sha256", "curve25519-sha256@libssh.org"];
 pub(crate) const HOST_KEY: &[&str] = &["ssh-ed25519"];

@@ -50,8 +50,25 @@ pub fn server_with(
     Server::new(edit(builder).build())
 }
 
+pub const CLIENT_USER: &[u8] = b"u";
+
 pub fn client() -> Client {
-    Client::new(ClientConfig::builder().rng(TestRng(2)).build())
+    Client::new(ClientConfig::builder(CLIENT_USER).rng(TestRng(2)).build())
+}
+
+/// `actions` from the client, with every host key it is asked to judge accepted.
+pub fn accepting_host_keys(client: &mut Client, actions: Vec<Action>) -> Vec<Action> {
+    let mut all = Vec::new();
+    for a in actions {
+        if let Action::VerifyHostKey { .. } = a {
+            all.push(a);
+            let more = client.process(Event::HostKeyAccepted);
+            all.extend(accepting_host_keys(client, more));
+        } else {
+            all.push(a);
+        }
+    }
+    all
 }
 
 /// What one side produced: bytes for the peer and, if it ended, how.
@@ -95,7 +112,8 @@ pub fn pump(server: &mut Server, client: &mut Client, chunk: usize) -> (Out, Out
             let end = s_sent.saturating_add(chunk).min(s.bytes.len());
             let piece = s.bytes[s_sent..end].to_vec();
             s_sent = end;
-            collect(client.process(Event::Received(&piece)), &mut c);
+            let actions = client.process(Event::Received(&piece));
+            collect(accepting_host_keys(client, actions), &mut c);
             moved = true;
         }
         if !moved {
@@ -153,17 +171,18 @@ pub fn client_given_reply(tamper: impl FnOnce(&mut justssh_wire::KexEcdhReply)) 
     let s_sent = s.bytes.len();
     collect(server.process(Event::Received(&c.bytes[c_sent..])), &mut s);
 
-    let payloads = split_plain(&s.bytes[s_sent..]);
+    let rest = &s.bytes[s_sent..];
+    let reply_len = 4 + u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+    let payloads = split_plain(&rest[..reply_len]);
     let Message::KexEcdhReply(mut reply) = Message::decode(&payloads[0]).unwrap() else {
         panic!("server did not reply to ECDH_INIT");
     };
     tamper(&mut reply);
     let mut forged = plain_packet(&Message::KexEcdhReply(reply).encode());
-    for p in &payloads[1..] {
-        forged.extend(plain_packet(p));
-    }
+    forged.extend(&rest[reply_len..]);
     let mut out = Out::default();
-    collect(client.process(Event::Received(&forged)), &mut out);
+    let actions = client.process(Event::Received(&forged));
+    collect(accepting_host_keys(&mut client, actions), &mut out);
     out
 }
 

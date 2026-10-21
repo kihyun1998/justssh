@@ -14,7 +14,9 @@ pub use connection::{
     ChannelId, ChannelInfo, ChannelOpenRequest, ChannelRequest, GlobalReplyToken, GlobalRequest,
     OpenFailureReason, ReplyToken,
 };
-pub use event::{Action, Closed, DisconnectReason, Error, Event, PasswordRequest, Phase};
+pub use event::{
+    Action, Closed, DisconnectReason, Error, Event, InfoRequest, PasswordRequest, Phase, Prompt,
+};
 pub use handshake::{AlgorithmCategory, Algorithms, Handshake, KexInitRecord};
 pub use rand_core;
 pub use server::Server;

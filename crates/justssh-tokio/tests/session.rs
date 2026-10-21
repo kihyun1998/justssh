@@ -19,10 +19,14 @@ struct RawClient {
 
 impl RawClient {
     async fn write(&mut self, actions: Vec<Action>) {
-        for a in actions {
+        let mut queue = std::collections::VecDeque::from(actions);
+        while let Some(a) = queue.pop_front() {
             match a {
                 Action::Write(b) => self.io.write_all(&b).await.unwrap(),
                 Action::RawReceived(p) => self.received.push(Message::decode(&p).unwrap()),
+                Action::VerifyHostKey { .. } => {
+                    queue.extend(self.client.process(Event::HostKeyAccepted));
+                }
                 _ => {}
             }
         }
@@ -66,7 +70,7 @@ async fn session_with_channel(
 
     let mut c = RawClient {
         io: client_io,
-        client: Client::new(ClientConfig::builder().build()),
+        client: Client::new(ClientConfig::builder(b"u").build()),
         received: Vec::new(),
     };
     let actions = c.client.process(Event::Connected);
@@ -179,7 +183,7 @@ async fn an_open_sent_right_behind_the_auth_request_is_not_lost() {
     });
     let mut c = RawClient {
         io: client_io,
-        client: Client::new(ClientConfig::builder().build()),
+        client: Client::new(ClientConfig::builder(b"u").build()),
         received: Vec::new(),
     };
     let actions = c.client.process(Event::Connected);
