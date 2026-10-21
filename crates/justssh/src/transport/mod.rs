@@ -17,6 +17,7 @@ use x25519_dalek::{EphemeralSecret, PublicKey};
 use zeroize::Zeroizing;
 
 use crate::config::{BoxRng, HostKey};
+use crate::connection::{ChannelId, ChannelInfo, Channels, Step};
 use crate::event::{Action, Closed, DisconnectReason, Error, Event, PasswordRequest, Phase};
 use crate::handshake::{Handshake, KexInitRecord};
 
@@ -78,6 +79,7 @@ pub(crate) struct Transport {
     peer_host_key: Option<Vec<u8>>,
     /// The server's authentication state; `None` for a client.
     auth: Option<ServerAuth>,
+    channels: Channels,
     #[cfg(feature = "test-support")]
     raw_receive: bool,
     actions: Vec<Action>,
@@ -90,6 +92,8 @@ impl Transport {
         rng: BoxRng,
         local_version: String,
         max_auth_tries: u32,
+        channel_window: u32,
+        channel_max_packet: u32,
     ) -> Self {
         Transport {
             role,
@@ -121,6 +125,7 @@ impl Transport {
             session_id: None,
             peer_host_key: None,
             auth: (role == Role::Server).then(|| ServerAuth::new(max_auth_tries)),
+            channels: Channels::new(channel_window, channel_max_packet),
             #[cfg(feature = "test-support")]
             raw_receive: false,
             actions: Vec::new(),
@@ -193,6 +198,34 @@ impl Transport {
             _ => self.fail(DisconnectReason::PROTOCOL_ERROR, Error::UnexpectedEvent),
         }
         std::mem::take(&mut self.actions)
+    }
+
+    /// Carries out what the channel table asked for, stopping at a failure.
+    fn run(&mut self, steps: Vec<Step>) {
+        for step in steps {
+            match step {
+                Step::Send(m) => self.send(&m),
+                Step::Emit(a) => self.actions.push(a),
+                Step::Fail(reason, error) => return self.fail(reason, error),
+            }
+        }
+    }
+
+    /// Applies a consumer command to the channels; nothing happens before the connection is
+    /// authenticated or after it has closed.
+    pub(crate) fn channels(
+        &mut self,
+        command: impl FnOnce(&mut Channels) -> Vec<Step>,
+    ) -> Vec<Action> {
+        if self.phase == Phase::Connected {
+            let steps = command(&mut self.channels);
+            self.run(steps);
+        }
+        std::mem::take(&mut self.actions)
+    }
+
+    pub(crate) fn channel_info(&self, id: ChannelId) -> Option<ChannelInfo> {
+        self.channels.info(id)
     }
 
     fn auth_pending(&self) -> bool {
@@ -404,6 +437,20 @@ impl Transport {
             }
             Message::Ping(p) => self.send(&Message::Pong(Pong::new(p.data))),
             Message::Pong(_) => {}
+            m @ (Message::ChannelOpen(_)
+            | Message::ChannelOpenConfirmation(_)
+            | Message::ChannelOpenFailure(_)
+            | Message::ChannelWindowAdjust(_)
+            | Message::ChannelData(_)
+            | Message::ChannelExtendedData(_)
+            | Message::ChannelEof(_)
+            | Message::ChannelClose(_)
+            | Message::ChannelRequest(_)
+            | Message::ChannelSuccess(_)
+            | Message::ChannelFailure(_)) => {
+                let steps = self.channels.handle(m);
+                self.run(steps);
+            }
             Message::Ignore(_) | Message::Debug(_) | Message::Unimplemented(_) => {}
             Message::KexInit(k) => self.on_kexinit(payload.to_vec(), k, first),
             Message::KexEcdhInit(m) => self.on_ecdh_init(&m.q_c),

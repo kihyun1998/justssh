@@ -11,6 +11,8 @@ justssh.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "time", "rt"] }
 
 [dev-dependencies]
+justssh = { workspace = true, features = ["test-support"] }
+justssh-wire.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "sync"] }
 
 [lints]
