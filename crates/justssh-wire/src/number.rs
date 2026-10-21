@@ -12,3 +12,7 @@ pub const NEWKEYS: u8 = 21;
 pub const KEX_ECDH_INIT: u8 = 30;
 pub const KEX_ECDH_REPLY: u8 = 31;
 pub const USERAUTH_REQUEST: u8 = 50;
+pub const USERAUTH_FAILURE: u8 = 51;
+pub const USERAUTH_SUCCESS: u8 = 52;
+pub const PING: u8 = 192;
+pub const PONG: u8 = 193;

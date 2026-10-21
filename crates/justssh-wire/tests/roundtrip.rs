@@ -1,6 +1,7 @@
 use justssh_wire::{
-    Debug, Disconnect, Ignore, KexEcdhInit, KexEcdhReply, KexInit, Message, NewKeys, ServiceAccept,
-    ServiceRequest, Unimplemented,
+    Debug, Disconnect, ExtInfo, Ignore, KexEcdhInit, KexEcdhReply, KexInit, Message, NewKeys, Ping,
+    Pong, ServiceAccept, ServiceRequest, Unimplemented, UserauthFailure, UserauthRequest,
+    UserauthSuccess,
 };
 use proptest::prelude::*;
 
@@ -57,6 +58,15 @@ fn message() -> impl Strategy<Value = Message> {
         (any::<bool>(), ".{0,40}", "[a-z-]{0,8}")
             .prop_map(|(a, m, l)| Message::Debug(Debug::new(a, m, l))),
         any::<u32>().prop_map(|s| Message::Unimplemented(Unimplemented::new(s))),
+        prop::collection::vec((name(), bytes()), 0..4)
+            .prop_map(|e| Message::ExtInfo(ExtInfo::new(e))),
+        (bytes(), name(), name(), bytes())
+            .prop_map(|(u, s, m, d)| Message::UserauthRequest(UserauthRequest::new(u, s, m, d))),
+        (names(), any::<bool>())
+            .prop_map(|(m, p)| Message::UserauthFailure(UserauthFailure::new(m, p))),
+        Just(Message::UserauthSuccess(UserauthSuccess::default())),
+        bytes().prop_map(|d| Message::Ping(Ping::new(d))),
+        bytes().prop_map(|d| Message::Pong(Pong::new(d))),
     ]
 }
 
@@ -113,5 +123,49 @@ fn unknown_message_number_decodes_as_unknown() {
     assert_eq!(
         Message::decode(&[200, 1, 2]).unwrap(),
         Message::Unknown(200)
+    );
+}
+
+#[test]
+fn ext_info_wire_layout_matches_rfc_8308() {
+    let m = ExtInfo::new(vec![("server-sig-algs".into(), b"a,b".to_vec())]);
+    let mut expected = vec![7u8, 0, 0, 0, 1, 0, 0, 0, 15];
+    expected.extend(b"server-sig-algs");
+    expected.extend([0, 0, 0, 3]);
+    expected.extend(b"a,b");
+    assert_eq!(Message::ExtInfo(m).encode(), expected);
+}
+
+#[test]
+fn a_password_request_keeps_its_method_data_raw() {
+    let mut payload = vec![50u8, 0, 0, 0, 2];
+    payload.extend(b"\xffu");
+    payload.extend([0, 0, 0, 14]);
+    payload.extend(b"ssh-connection");
+    payload.extend([0, 0, 0, 8]);
+    payload.extend(b"password");
+    payload.extend([0, 0, 0, 0, 2, b'p', b'w']);
+    let Message::UserauthRequest(r) = Message::decode(&payload).unwrap() else {
+        panic!("not a userauth request");
+    };
+    assert_eq!(r.user, b"\xffu");
+    assert_eq!(r.service, "ssh-connection");
+    assert_eq!(r.method, "password");
+    assert_eq!(r.method_data, [0, 0, 0, 0, 2, b'p', b'w']);
+    assert_eq!(Message::UserauthRequest(r).encode(), payload);
+}
+
+#[test]
+fn a_userauth_request_does_not_show_its_method_data_in_debug_output() {
+    let r = UserauthRequest::new(
+        b"u".to_vec(),
+        "ssh-connection",
+        "password",
+        b"\0\0\0\0\x06hunter".to_vec(),
+    );
+    let shown = format!("{:?}", Message::UserauthRequest(r));
+    assert!(
+        !shown.contains("hunter") && !shown.contains("104, 117"),
+        "{shown}"
     );
 }

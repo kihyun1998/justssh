@@ -1,6 +1,7 @@
 //! Server and client configuration.
 
 use core::fmt;
+use core::num::NonZeroU32;
 
 use ed25519_dalek::Signer;
 use justssh_wire::Writer;
@@ -62,6 +63,7 @@ pub struct ServerConfig {
     pub(crate) host_key: HostKey,
     pub(crate) rng: BoxRng,
     pub(crate) version: String,
+    pub(crate) max_auth_tries: u32,
 }
 
 impl ServerConfig {
@@ -71,6 +73,7 @@ impl ServerConfig {
             host_key,
             rng: None,
             version: None,
+            max_auth_tries: 6,
         }
     }
 }
@@ -80,9 +83,24 @@ pub struct ServerConfigBuilder {
     host_key: HostKey,
     rng: Option<BoxRng>,
     version: Option<String>,
+    max_auth_tries: u32,
 }
 
 impl ServerConfigBuilder {
+    /// Failed authentication attempts after which the server disconnects. Defaults to 6,
+    /// x/crypto/ssh's `MaxAuthTries` default. The client's first `none` request does not count.
+    pub fn max_auth_tries(mut self, limit: NonZeroU32) -> Self {
+        self.max_auth_tries = limit.get();
+        self
+    }
+
+    /// No limit on failed authentication attempts; the cap of 128 attempts of any outcome
+    /// still applies.
+    pub fn unlimited_auth_tries(mut self) -> Self {
+        self.max_auth_tries = 0;
+        self
+    }
+
     /// The software version in the identification line: `SSH-2.0-<version>`. Defaults to
     /// `justssh`.
     ///
@@ -112,6 +130,7 @@ impl ServerConfigBuilder {
             host_key: self.host_key,
             rng: self.rng.unwrap_or_else(system_rng),
             version: format!("SSH-2.0-{}", self.version.as_deref().unwrap_or("justssh")),
+            max_auth_tries: self.max_auth_tries,
         }
     }
 }

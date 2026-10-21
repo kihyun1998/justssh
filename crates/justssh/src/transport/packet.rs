@@ -62,7 +62,7 @@ pub(crate) enum OpenError {
 
 /// A received packet's payload and how many buffered bytes it used.
 pub(crate) struct Opened {
-    pub payload: Vec<u8>,
+    pub payload: Zeroizing<Vec<u8>>,
     pub used: usize,
 }
 
@@ -75,12 +75,12 @@ fn padding(aligned: usize) -> usize {
 }
 
 /// The payload inside `packet_length` bytes of decrypted `padding_length || payload || padding`.
-fn unpad(body: &[u8]) -> Result<Vec<u8>, OpenError> {
+fn unpad(body: &[u8]) -> Result<Zeroizing<Vec<u8>>, OpenError> {
     let pad = usize::from(body[0]);
     if pad < 4 || pad + 1 >= body.len() {
         return Err(OpenError::Malformed);
     }
-    Ok(body[1..body.len() - pad].to_vec())
+    Ok(Zeroizing::new(body[1..body.len() - pad].to_vec()))
 }
 
 impl Cipher {

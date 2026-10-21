@@ -30,8 +30,13 @@ subtle.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+justssh = { path = ".", features = ["test-support"] }
 proptest.workspace = true
 x25519-dalek = { workspace = true, features = ["static_secrets"] }
 
 [lints]
 workspace = true
+
+[features]
+# Lets a Client send raw payloads and hand back raw received ones; for tests and fuzzing only.
+test-support = []

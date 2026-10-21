@@ -173,6 +173,12 @@ pub enum Message {
     Ignore(Ignore),
     Debug(Debug),
     Unimplemented(Unimplemented),
+    ExtInfo(ExtInfo),
+    UserauthRequest(UserauthRequest),
+    UserauthFailure(UserauthFailure),
+    UserauthSuccess(UserauthSuccess),
+    Ping(Ping),
+    Pong(Pong),
     /// A message number this crate has no decoder for; its body is not read.
     Unknown(u8),
 }
@@ -233,6 +239,35 @@ impl Message {
             }
             Message::Unimplemented(m) => {
                 w.u8(number::UNIMPLEMENTED).u32(m.sequence_number);
+            }
+            Message::ExtInfo(m) => {
+                let count =
+                    u32::try_from(m.extensions.len()).expect("more than u32::MAX extensions");
+                w.u8(number::EXT_INFO).u32(count);
+                for (name, value) in &m.extensions {
+                    w.string(name.as_bytes()).string(value);
+                }
+            }
+            Message::UserauthRequest(m) => {
+                w.u8(number::USERAUTH_REQUEST)
+                    .string(&m.user)
+                    .string(m.service.as_bytes())
+                    .string(m.method.as_bytes())
+                    .bytes(&m.method_data);
+            }
+            Message::UserauthFailure(m) => {
+                w.u8(number::USERAUTH_FAILURE)
+                    .name_list(&m.methods)
+                    .bool(m.partial_success);
+            }
+            Message::UserauthSuccess(_) => {
+                w.u8(number::USERAUTH_SUCCESS);
+            }
+            Message::Ping(m) => {
+                w.u8(number::PING).string(&m.data);
+            }
+            Message::Pong(m) => {
+                w.u8(number::PONG).string(&m.data);
             }
             Message::Unknown(n) => {
                 w.u8(*n);
@@ -297,9 +332,138 @@ impl Message {
                 })
             }
             number::UNIMPLEMENTED => Message::Unimplemented(Unimplemented::new(r.u32()?)),
+            number::EXT_INFO => {
+                let count = r.u32()?;
+                let mut extensions = Vec::new();
+                for _ in 0..count {
+                    let name = r.utf8()?.to_owned();
+                    extensions.push((name, r.string()?.to_vec()));
+                }
+                Message::ExtInfo(ExtInfo { extensions })
+            }
+            number::USERAUTH_REQUEST => {
+                let user = r.string()?.to_vec();
+                let service = r.utf8()?.to_owned();
+                let method = r.utf8()?.to_owned();
+                let method_data = r.remaining().to_vec();
+                return Ok(Message::UserauthRequest(UserauthRequest {
+                    user,
+                    service,
+                    method,
+                    method_data,
+                }));
+            }
+            number::USERAUTH_FAILURE => Message::UserauthFailure(UserauthFailure {
+                methods: r.name_list()?,
+                partial_success: r.bool()?,
+            }),
+            number::USERAUTH_SUCCESS => Message::UserauthSuccess(UserauthSuccess),
+            number::PING => Message::Ping(Ping::new(r.string()?.to_vec())),
+            number::PONG => Message::Pong(Pong::new(r.string()?.to_vec())),
             other => return Ok(Message::Unknown(other)),
         };
         r.finish()?;
         Ok(m)
+    }
+}
+
+/// `SSH_MSG_EXT_INFO` (RFC 8308 §2.3): extension names and their values.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtInfo {
+    pub extensions: Vec<(String, Vec<u8>)>,
+}
+
+impl ExtInfo {
+    pub fn new(extensions: Vec<(String, Vec<u8>)>) -> Self {
+        ExtInfo { extensions }
+    }
+}
+
+/// `SSH_MSG_USERAUTH_REQUEST` (RFC 4252 §5). `method_data` is everything after the method
+/// name, left undecoded; it can hold a password, so `Debug` shows only its length.
+#[non_exhaustive]
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct UserauthRequest {
+    /// The user name as sent; RFC 4252 calls for UTF-8, but nothing on the wire enforces it.
+    pub user: Vec<u8>,
+    pub service: String,
+    pub method: String,
+    pub method_data: Vec<u8>,
+}
+
+impl core::fmt::Debug for UserauthRequest {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("UserauthRequest")
+            .field("user", &String::from_utf8_lossy(&self.user))
+            .field("service", &self.service)
+            .field("method", &self.method)
+            .field("method_data_len", &self.method_data.len())
+            .finish()
+    }
+}
+
+impl UserauthRequest {
+    pub fn new(
+        user: Vec<u8>,
+        service: impl Into<String>,
+        method: impl Into<String>,
+        method_data: Vec<u8>,
+    ) -> Self {
+        UserauthRequest {
+            user,
+            service: service.into(),
+            method: method.into(),
+            method_data,
+        }
+    }
+}
+
+/// `SSH_MSG_USERAUTH_FAILURE`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserauthFailure {
+    /// Methods that may continue.
+    pub methods: Vec<String>,
+    pub partial_success: bool,
+}
+
+impl UserauthFailure {
+    pub fn new(methods: Vec<String>, partial_success: bool) -> Self {
+        UserauthFailure {
+            methods,
+            partial_success,
+        }
+    }
+}
+
+/// `SSH_MSG_USERAUTH_SUCCESS`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserauthSuccess;
+
+/// `SSH2_MSG_PING` (OpenSSH PROTOCOL §1.8).
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ping {
+    pub data: Vec<u8>,
+}
+
+impl Ping {
+    pub fn new(data: Vec<u8>) -> Self {
+        Ping { data }
+    }
+}
+
+/// `SSH2_MSG_PONG`: the data of the `SSH2_MSG_PING` it answers.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pong {
+    pub data: Vec<u8>,
+}
+
+impl Pong {
+    pub fn new(data: Vec<u8>) -> Self {
+        Pong { data }
     }
 }
