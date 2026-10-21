@@ -9,13 +9,43 @@ pub(crate) const STRICT_CLIENT: &str = "kex-strict-c-v00@openssh.com";
 pub(crate) const STRICT_SERVER: &str = "kex-strict-s-v00@openssh.com";
 pub(crate) const EXT_INFO_CLIENT: &str = "ext-info-c";
 
-pub(crate) const KEX: &[&str] = &["curve25519-sha256", "curve25519-sha256@libssh.org"];
+/// x/crypto/ssh v0.55's `defaultKexAlgos`, with the alias it adds after `curve25519-sha256`.
+pub(crate) const KEX: &[&str] = &[
+    "mlkem768x25519-sha256",
+    "curve25519-sha256",
+    "curve25519-sha256@libssh.org",
+    "ecdh-sha2-nistp256",
+    "ecdh-sha2-nistp384",
+    "ecdh-sha2-nistp521",
+    "diffie-hellman-group14-sha256",
+    "diffie-hellman-group14-sha1",
+];
 pub(crate) const HOST_KEY: &[&str] = &["ssh-ed25519"];
-pub(crate) const CIPHER: &[&str] = &["chacha20-poly1305@openssh.com"];
+/// x/crypto/ssh v0.55's `defaultCiphers`.
+pub(crate) const CIPHER: &[&str] = &[
+    "aes128-gcm@openssh.com",
+    "aes256-gcm@openssh.com",
+    "chacha20-poly1305@openssh.com",
+    "aes128-ctr",
+    "aes192-ctr",
+    "aes256-ctr",
+];
+/// x/crypto/ssh v0.55's `defaultMACs`.
+pub(crate) const MAC: &[&str] = &[
+    "hmac-sha2-256-etm@openssh.com",
+    "hmac-sha2-512-etm@openssh.com",
+    "hmac-sha2-256",
+    "hmac-sha2-512",
+    "hmac-sha1",
+    "hmac-sha1-96",
+];
 pub(crate) const COMPRESSION: &[&str] = &["none"];
 
 fn is_aead(cipher: &str) -> bool {
-    cipher == "chacha20-poly1305@openssh.com"
+    matches!(
+        cipher,
+        "chacha20-poly1305@openssh.com" | "aes128-gcm@openssh.com" | "aes256-gcm@openssh.com"
+    )
 }
 
 /// The names in `offered` that this crate implements, which leaves out markers such as
