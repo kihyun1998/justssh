@@ -16,7 +16,7 @@ fn ed25519_host_key_blob() -> Vec<u8> {
 
 fn expect_local_close(out: &Out) -> (DisconnectReason, Error) {
     match out.closed.as_ref().expect("connection stayed open") {
-        Closed::Local { reason, error } => (*reason, error.clone()),
+        Closed::Local { reason, error, .. } => (*reason, error.clone()),
         other => panic!("expected a local close, got {other:?}"),
     }
 }
@@ -236,6 +236,7 @@ fn a_peer_disconnect_is_reported_with_its_reason() {
         Some(Closed::Peer {
             reason,
             description,
+            ..
         }) => {
             assert_eq!(reason, DisconnectReason::BY_APPLICATION);
             assert_eq!(description, "bye");
@@ -297,6 +298,7 @@ fn an_encrypted_disconnect_reaches_the_peer() {
         Some(Closed::Peer {
             reason,
             description,
+            ..
         }) => {
             assert_eq!(reason, DisconnectReason::BY_APPLICATION);
             assert_eq!(description, "done");

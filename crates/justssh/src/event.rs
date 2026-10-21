@@ -3,6 +3,7 @@
 use core::fmt;
 
 use justssh_wire::DecodeError;
+use zeroize::Zeroizing;
 
 use crate::handshake::{AlgorithmCategory, Handshake};
 
@@ -15,6 +16,12 @@ pub enum Event<'a> {
     Connected,
     /// Bytes from the peer, split anywhere.
     Received(&'a [u8]),
+    /// The consumer accepts the pending [`Action::PasswordRequest`].
+    AuthAccepted,
+    /// The consumer rejects the pending [`Action::PasswordRequest`].
+    AuthRejected,
+    /// A deadline the consumer set for the current phase has passed.
+    DeadlineExceeded,
 }
 
 /// Output of the state machines, to be carried out in order.
@@ -23,11 +30,46 @@ pub enum Event<'a> {
 pub enum Action {
     /// Bytes to send to the peer.
     Write(Vec<u8>),
+    /// A client asks to authenticate with a password. Nothing further is processed until the
+    /// consumer answers with [`Event::AuthAccepted`] or [`Event::AuthRejected`].
+    PasswordRequest(PasswordRequest),
     /// The connection is over; nothing more will be written or accepted.
     Closed(Closed),
+    /// A payload received after the first key exchange, handed over undecoded instead of being
+    /// handled (`test-support` raw mode).
+    #[cfg(feature = "test-support")]
+    RawReceived(Vec<u8>),
 }
 
-/// How a connection ended.
+/// A password authentication attempt (RFC 4252 §8).
+#[non_exhaustive]
+pub struct PasswordRequest {
+    pub(crate) user: Vec<u8>,
+    pub(crate) password: Zeroizing<Vec<u8>>,
+}
+
+impl PasswordRequest {
+    /// The user name, as sent.
+    pub fn user(&self) -> &[u8] {
+        &self.user
+    }
+
+    /// The password, as sent.
+    pub fn password(&self) -> &[u8] {
+        &self.password
+    }
+}
+
+impl fmt::Debug for PasswordRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PasswordRequest")
+            .field("user", &String::from_utf8_lossy(&self.user))
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+/// How a connection ended, and the phase it was in when it did.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Closed {
@@ -36,13 +78,18 @@ pub enum Closed {
     Local {
         reason: DisconnectReason,
         error: Error,
+        phase: Phase,
     },
     /// The consumer asked to disconnect.
-    Requested { reason: DisconnectReason },
+    Requested {
+        reason: DisconnectReason,
+        phase: Phase,
+    },
     /// The peer sent `SSH_MSG_DISCONNECT`.
     Peer {
         reason: DisconnectReason,
         description: String,
+        phase: Phase,
     },
 }
 
@@ -85,6 +132,8 @@ pub enum Phase {
     Handshake,
     /// User authentication.
     Auth,
+    /// Authenticated: the connection protocol.
+    Connected,
     /// The connection has ended.
     Closed,
 }
@@ -117,11 +166,18 @@ pub enum Error {
     KeyExchange,
     /// The server's host key or its signature over the exchange hash did not verify.
     HostKeySignature,
-    /// The peer asked for a service other than `ssh-userauth`.
+    /// The peer asked for a service other than `ssh-userauth`, or authenticated for one other
+    /// than `ssh-connection`.
     ServiceNotAvailable,
-    /// User authentication was requested and no method is available.
-    NoAuthMethods,
-    /// A sequence number would wrap before the first key exchange finished.
+    /// Failed authentication attempts reached the configured limit.
+    TooManyAuthFailures,
+    /// Authentication attempts of any outcome reached 128.
+    TooManyAuthAttempts,
+    /// The consumer reported [`Event::DeadlineExceeded`].
+    DeadlineExceeded,
+    /// More input arrived while a verdict was pending than one packet could hold.
+    InputOverflow,
+    /// A sequence number would repeat under one key.
     SequenceWrap,
 }
 
@@ -141,8 +197,11 @@ impl fmt::Display for Error {
             Error::KeyExchange => f.write_str("key exchange failed"),
             Error::HostKeySignature => f.write_str("host key signature did not verify"),
             Error::ServiceNotAvailable => f.write_str("service not available"),
-            Error::NoAuthMethods => f.write_str("no authentication methods available"),
-            Error::SequenceWrap => f.write_str("sequence number wrapped during key exchange"),
+            Error::TooManyAuthFailures => f.write_str("too many authentication failures"),
+            Error::TooManyAuthAttempts => f.write_str("too many authentication attempts"),
+            Error::DeadlineExceeded => f.write_str("deadline exceeded"),
+            Error::InputOverflow => f.write_str("too much input while a verdict was pending"),
+            Error::SequenceWrap => f.write_str("sequence number would repeat under one key"),
         }
     }
 }

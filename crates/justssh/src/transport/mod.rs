@@ -5,25 +5,37 @@ mod allowed;
 mod kex;
 mod negotiate;
 mod packet;
+mod userauth;
 mod version;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use justssh_wire::{
-    Disconnect, KexEcdhInit, KexEcdhReply, KexInit, Message, NewKeys, Reader, ServiceAccept,
-    ServiceRequest, number,
+    Disconnect, ExtInfo, KexEcdhInit, KexEcdhReply, KexInit, Message, NewKeys, Pong, Reader,
+    ServiceAccept, ServiceRequest, UserauthFailure, UserauthSuccess, number,
 };
 use x25519_dalek::{EphemeralSecret, PublicKey};
 use zeroize::Zeroizing;
 
 use crate::config::{BoxRng, HostKey};
-use crate::event::{Action, Closed, DisconnectReason, Error, Event, Phase};
+use crate::event::{Action, Closed, DisconnectReason, Error, Event, PasswordRequest, Phase};
 use crate::handshake::{Handshake, KexInitRecord};
 
 use allowed::{Stage, Verdict};
 use packet::{ChaChaKeys, Cipher, OpenError};
+use userauth::{AfterFailure, ServerAuth};
 use version::{Line, VersionError};
 
 const USERAUTH: &str = "ssh-userauth";
+
+/// Most input held unprocessed while a verdict is pending: one largest packet with its length
+/// field and MAC.
+const PENDING_INPUT: usize = packet::MAX_PACKET + 4 + 16;
+
+/// The `server-sig-algs` value sent in `SSH_MSG_EXT_INFO`: x/crypto/ssh's default public key
+/// authentication algorithms, in its order.
+const SERVER_SIG_ALGS: &str = "ssh-ed25519,sk-ssh-ed25519@openssh.com,\
+    sk-ecdsa-sha2-nistp256@openssh.com,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,\
+    ecdsa-sha2-nistp521,rsa-sha2-256,rsa-sha2-512,ssh-rsa,ssh-dss";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
@@ -64,6 +76,10 @@ pub(crate) struct Transport {
     exchange: Option<Exchange>,
     session_id: Option<Vec<u8>>,
     peer_host_key: Option<Vec<u8>>,
+    /// The server's authentication state; `None` for a client.
+    auth: Option<ServerAuth>,
+    #[cfg(feature = "test-support")]
+    raw_receive: bool,
     actions: Vec<Action>,
 }
 
@@ -73,6 +89,7 @@ impl Transport {
         host_key: Option<HostKey>,
         rng: BoxRng,
         local_version: String,
+        max_auth_tries: u32,
     ) -> Self {
         Transport {
             role,
@@ -103,8 +120,25 @@ impl Transport {
             exchange: None,
             session_id: None,
             peer_host_key: None,
+            auth: (role == Role::Server).then(|| ServerAuth::new(max_auth_tries)),
+            #[cfg(feature = "test-support")]
+            raw_receive: false,
             actions: Vec::new(),
         }
+    }
+
+    /// Sends `payload` as one packet, whatever it holds.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn send_raw(&mut self, payload: &[u8]) -> Vec<Action> {
+        self.send_payload(payload);
+        std::mem::take(&mut self.actions)
+    }
+
+    /// After the first key exchange, hands every received payload over as
+    /// [`Action::RawReceived`] instead of handling it.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn set_raw_receive(&mut self, raw: bool) {
+        self.raw_receive = raw;
     }
 
     pub(crate) fn phase(&self) -> Phase {
@@ -135,11 +169,40 @@ impl Transport {
             }
             Event::Received(bytes) if self.started => {
                 self.inbuf.extend_from_slice(bytes);
+                if self.auth_pending() && self.inbuf.len() > PENDING_INPUT {
+                    self.fail(DisconnectReason::PROTOCOL_ERROR, Error::InputOverflow);
+                } else {
+                    self.drain();
+                }
+            }
+            Event::AuthAccepted if self.auth_pending() => {
+                self.end_pending();
+                self.send(&Message::UserauthSuccess(UserauthSuccess::default()));
+                self.stage = Stage::Connected;
+                self.phase = Phase::Connected;
                 self.drain();
+            }
+            Event::AuthRejected if self.auth_pending() => {
+                self.end_pending();
+                self.auth_failed("password");
+                self.drain();
+            }
+            Event::DeadlineExceeded if self.started => {
+                self.fail(DisconnectReason::BY_APPLICATION, Error::DeadlineExceeded)
             }
             _ => self.fail(DisconnectReason::PROTOCOL_ERROR, Error::UnexpectedEvent),
         }
         std::mem::take(&mut self.actions)
+    }
+
+    fn auth_pending(&self) -> bool {
+        self.auth.as_ref().is_some_and(|a| a.pending)
+    }
+
+    fn end_pending(&mut self) {
+        if let Some(a) = self.auth.as_mut() {
+            a.pending = false;
+        }
     }
 
     pub(crate) fn disconnect(
@@ -153,7 +216,8 @@ impl Transport {
                 description,
                 "",
             )));
-            self.close(Closed::Requested { reason });
+            let phase = self.phase;
+            self.close(Closed::Requested { reason, phase });
         }
         std::mem::take(&mut self.actions)
     }
@@ -172,6 +236,7 @@ impl Transport {
                 self.close(Closed::Local {
                     reason: DisconnectReason::PROTOCOL_ERROR,
                     error: Error::SequenceWrap,
+                    phase: self.phase,
                 });
             }
             return;
@@ -200,7 +265,12 @@ impl Transport {
                 "",
             )));
         }
-        self.close(Closed::Local { reason, error });
+        let phase = self.phase;
+        self.close(Closed::Local {
+            reason,
+            error,
+            phase,
+        });
     }
 
     fn drain(&mut self) {
@@ -211,7 +281,7 @@ impl Transport {
 
     /// Handles everything complete in `inbuf[*consumed..]`, advancing `consumed` past it.
     fn drain_from(&mut self, consumed: &mut usize) {
-        while self.phase != Phase::Closed {
+        while self.phase != Phase::Closed && !self.auth_pending() {
             if !self.version_done {
                 match version::take_line(&mut self.inbuf, &mut self.version_budget) {
                     Ok(Line::Incomplete) => return,
@@ -299,10 +369,16 @@ impl Transport {
             self.skip_next = false;
             return;
         }
+        #[cfg(feature = "test-support")]
+        if self.raw_receive && self.first_kex_done {
+            self.actions.push(Action::RawReceived(payload.to_vec()));
+            return;
+        }
         let n = payload[0];
         let strict_initial = self.strict() && !self.first_kex_done;
         match allowed::verdict(self.role, self.stage, n, strict_initial) {
             Verdict::Accept => {}
+            Verdict::Ignore => return,
             Verdict::Disconnect => {
                 return self.fail(
                     DisconnectReason::PROTOCOL_ERROR,
@@ -311,20 +387,23 @@ impl Transport {
             }
         }
         if n == number::USERAUTH_REQUEST {
-            return self.fail(
-                DisconnectReason::NO_MORE_AUTH_METHODS_AVAILABLE,
-                Error::NoAuthMethods,
-            );
+            return self.on_userauth_request(payload);
         }
         let message = match Message::decode(payload) {
             Ok(m) => m,
             Err(e) => return self.fail(DisconnectReason::PROTOCOL_ERROR, Error::Decode(e)),
         };
         match message {
-            Message::Disconnect(d) => self.close(Closed::Peer {
-                reason: DisconnectReason::from_code(d.reason),
-                description: d.description,
-            }),
+            Message::Disconnect(d) => {
+                let phase = self.phase;
+                self.close(Closed::Peer {
+                    reason: DisconnectReason::from_code(d.reason),
+                    description: d.description,
+                    phase,
+                })
+            }
+            Message::Ping(p) => self.send(&Message::Pong(Pong::new(p.data))),
+            Message::Pong(_) => {}
             Message::Ignore(_) | Message::Debug(_) | Message::Unimplemented(_) => {}
             Message::KexInit(k) => self.on_kexinit(payload.to_vec(), k, first),
             Message::KexEcdhInit(m) => self.on_ecdh_init(&m.q_c),
@@ -513,6 +592,7 @@ impl Transport {
 
     /// Sends `SSH_MSG_NEWKEYS` and takes the new outgoing keys into use.
     fn finish_exchange(&mut self, shared: &[u8], h: &[u8]) {
+        let first = self.session_id.is_none();
         let session_id = self.session_id.get_or_insert_with(|| h.to_vec()).clone();
         let client_to_server = kex::derive(shared, h, b'C', &session_id, 64);
         let server_to_client = kex::derive(shared, h, b'D', &session_id, 64);
@@ -530,6 +610,75 @@ impl Transport {
             e.incoming = Some(Cipher::ChaCha(ChaChaKeys::from_material(&incoming)));
         }
         self.stage = Stage::NewKeys;
+        if first && self.role == Role::Server && self.peer_offered("ext-info-c") {
+            self.send(&Message::ExtInfo(ExtInfo::new(vec![
+                (
+                    "server-sig-algs".to_owned(),
+                    SERVER_SIG_ALGS.as_bytes().to_vec(),
+                ),
+                ("ping@openssh.com".to_owned(), b"0".to_vec()),
+            ])));
+        }
+    }
+
+    /// Whether the peer's `SSH_MSG_KEXINIT` listed `name` among its key exchange algorithms.
+    fn peer_offered(&self, name: &str) -> bool {
+        self.handshake
+            .peer_kexinit
+            .as_ref()
+            .is_some_and(|k| k.message.kex_algorithms.iter().any(|a| a == name))
+    }
+
+    fn on_userauth_request(&mut self, payload: &[u8]) {
+        let request = match userauth::request(payload) {
+            Ok(r) => r,
+            Err(e) => return self.fail(DisconnectReason::PROTOCOL_ERROR, Error::Decode(e)),
+        };
+        let Some(auth) = self.auth.as_mut() else {
+            return self.fail(
+                DisconnectReason::PROTOCOL_ERROR,
+                Error::UnexpectedMessage {
+                    number: number::USERAUTH_REQUEST,
+                },
+            );
+        };
+        auth.attempt(request.method);
+        if request.service != userauth::CONNECTION {
+            return self.fail(
+                DisconnectReason::SERVICE_NOT_AVAILABLE,
+                Error::ServiceNotAvailable,
+            );
+        }
+        if request.method != "password" {
+            return self.auth_failed(request.method);
+        }
+        match userauth::password(request.method_data) {
+            Ok(password) => {
+                auth.pending = true;
+                self.actions.push(Action::PasswordRequest(PasswordRequest {
+                    user: request.user.to_vec(),
+                    password,
+                }));
+            }
+            Err(e) => self.fail(DisconnectReason::PROTOCOL_ERROR, Error::Decode(e)),
+        }
+    }
+
+    fn auth_failed(&mut self, method: &str) {
+        let Some(auth) = self.auth.as_mut() else {
+            return;
+        };
+        let after = auth.failed(method);
+        if let AfterFailure::TooManyFailures = after {
+            return self.fail(DisconnectReason::PROTOCOL_ERROR, Error::TooManyAuthFailures);
+        }
+        let methods = userauth::METHODS.iter().map(|m| (*m).to_owned()).collect();
+        self.send(&Message::UserauthFailure(UserauthFailure::new(
+            methods, false,
+        )));
+        if let AfterFailure::FailureThenTooManyAttempts = after {
+            self.fail(DisconnectReason::PROTOCOL_ERROR, Error::TooManyAuthAttempts);
+        }
     }
 
     fn on_newkeys(&mut self) {

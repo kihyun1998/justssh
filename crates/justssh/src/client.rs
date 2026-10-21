@@ -13,8 +13,21 @@ pub struct Client {
 impl Client {
     pub fn new(config: ClientConfig) -> Self {
         Client {
-            transport: Transport::new(Role::Client, None, config.rng, config.version),
+            transport: Transport::new(Role::Client, None, config.rng, config.version, 0),
         }
+    }
+
+    /// Sends `payload` as one packet, whatever it holds. For tests and fuzzing.
+    #[cfg(feature = "test-support")]
+    pub fn send_raw(&mut self, payload: &[u8]) -> Vec<Action> {
+        self.transport.send_raw(payload)
+    }
+
+    /// After the first key exchange, hands every received payload over as
+    /// [`Action::RawReceived`] instead of handling it. For tests and fuzzing.
+    #[cfg(feature = "test-support")]
+    pub fn set_raw_receive(&mut self, raw: bool) {
+        self.transport.set_raw_receive(raw);
     }
 
     pub fn process(&mut self, event: Event<'_>) -> Vec<Action> {

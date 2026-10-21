@@ -18,6 +18,8 @@ pub(crate) enum Stage {
     Service,
     /// User authentication.
     Auth,
+    /// Authenticated.
+    Connected,
 }
 
 /// What to do with a received message.
@@ -25,12 +27,14 @@ pub(crate) enum Stage {
 pub(crate) enum Verdict {
     Accept,
     Disconnect,
+    /// Drop it without a reply (RFC 4252 §5: requests after `SSH_MSG_USERAUTH_SUCCESS`).
+    Ignore,
 }
 
 /// The verdict for message `n` arriving at `role` in `stage`. `strict_initial` is true while
 /// strict key exchange is in force and the first key exchange has not finished.
 pub(crate) fn verdict(role: Role, stage: Stage, n: u8, strict_initial: bool) -> Verdict {
-    use Verdict::{Accept, Disconnect};
+    use Verdict::{Accept, Disconnect, Ignore};
 
     let accept_if = |ok: bool| if ok { Accept } else { Disconnect };
     match n {
@@ -42,7 +46,9 @@ pub(crate) fn verdict(role: Role, stage: Stage, n: u8, strict_initial: bool) -> 
         number::NEWKEYS => accept_if(stage == Stage::NewKeys),
         number::SERVICE_REQUEST => accept_if(role == Role::Server && stage == Stage::Service),
         number::SERVICE_ACCEPT => accept_if(role == Role::Client && stage == Stage::Service),
+        number::USERAUTH_REQUEST if role == Role::Server && stage == Stage::Connected => Ignore,
         number::USERAUTH_REQUEST => accept_if(role == Role::Server && stage == Stage::Auth),
+        number::PING | number::PONG => accept_if(stage == Stage::Connected),
         _ => Disconnect,
     }
 }

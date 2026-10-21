@@ -18,6 +18,7 @@ impl Server {
                 Some(config.host_key),
                 config.rng,
                 config.version,
+                config.max_auth_tries,
             ),
         }
     }

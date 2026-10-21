@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc ad7a5cc0ba9b1021fec9e7694abb3956eb67719378f03676a0687cc8053b0a10 # shrinks to m = KexInit(KexInit { cookie: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], kex_algorithms: [], server_host_key_algorithms: [], encryption_algorithms_client_to_server: [], encryption_algorithms_server_to_client: [], mac_algorithms_client_to_server: [], mac_algorithms_server_to_client: ["a"], compression_algorithms_client_to_server: [], compression_algorithms_server_to_client: [], languages_client_to_server: [], languages_server_to_client: [], first_kex_packet_follows: false, reserved: 0 })
+cc c7353e3a1ddf06554cf74fe44ee5751e715c5824962db69bbe523125dbe71102 # shrinks to m = ExtInfo(ExtInfo { extensions: [] })
+cc 669002f3f7a9d3c7747affa43347f190ea0edbb9b99c7eec8ac5473637e51b33 # shrinks to m = UserauthRequest(UserauthRequest { user: [], service: "-", method: "-", method_data: [0] })
