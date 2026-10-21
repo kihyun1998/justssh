@@ -661,3 +661,147 @@ async fn logs_in_to_openssh_8_7_with_keys_and_a_certificate() {
         }
     }
 }
+
+/// Logs in to the sshd in `var` by password with the client offering only `kex`, `cipher` and
+/// `mac`; the algorithms the connection used.
+async fn password_login_with(
+    var: &str,
+    kex: &str,
+    cipher: &str,
+    mac: &str,
+) -> Option<justssh::Algorithms> {
+    password_login_offering(var, kex, cipher, mac, true).await
+}
+
+/// As [`password_login_with`], offering strict KEX only when `strict`.
+async fn password_login_offering(
+    var: &str,
+    kex: &str,
+    cipher: &str,
+    mac: &str,
+    strict: bool,
+) -> Option<justssh::Algorithms> {
+    let (addr, user, password) = target(var)?;
+    let io = TcpStream::connect(&addr).await.unwrap();
+    let mut client = Client::new(
+        ClientConfig::builder(&user)
+            .algorithms(&[kex], &[cipher], &[mac])
+            .strict_kex(strict)
+            .build(),
+    );
+    let mut broker = Broker {
+        password: password.clone(),
+        prompts: Vec::new(),
+        host_key: None,
+    };
+    let connected = justssh_tokio::connect(
+        io,
+        &mut client,
+        &Deadlines::new(),
+        &[AuthMethod::Password(Zeroizing::new(password))],
+        &mut broker,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(connected, Connected::Authenticated { .. }),
+        "{kex} {cipher} {mac}: {connected:?}"
+    );
+    Some(client.handshake().negotiated().unwrap().clone())
+}
+
+const CTR_MACS: &[&str] = &[
+    "hmac-sha2-256-etm@openssh.com",
+    "hmac-sha2-512-etm@openssh.com",
+    "hmac-sha2-256",
+    "hmac-sha2-512",
+    "hmac-sha1",
+    "hmac-sha1-96",
+];
+
+#[tokio::test]
+async fn the_client_logs_in_to_sshd_under_each_key_exchange_cipher_and_mac() {
+    for kex in [
+        "curve25519-sha256",
+        "curve25519-sha256@libssh.org",
+        "ecdh-sha2-nistp256",
+        "ecdh-sha2-nistp384",
+        "ecdh-sha2-nistp521",
+        "diffie-hellman-group14-sha256",
+        "diffie-hellman-group14-sha1",
+    ] {
+        let Some(algs) = password_login_with(
+            "JUSTSSH_SSHD_PASSWORD_ADDR",
+            kex,
+            "aes128-ctr",
+            "hmac-sha2-256",
+        )
+        .await
+        else {
+            return;
+        };
+        assert_eq!(algs.kex(), kex);
+    }
+    for cipher in [
+        "aes128-gcm@openssh.com",
+        "aes256-gcm@openssh.com",
+        "chacha20-poly1305@openssh.com",
+        "aes128-ctr",
+        "aes192-ctr",
+        "aes256-ctr",
+    ] {
+        let algs = password_login_with(
+            "JUSTSSH_SSHD_PASSWORD_ADDR",
+            "curve25519-sha256",
+            cipher,
+            "hmac-sha2-256",
+        )
+        .await
+        .unwrap();
+        assert_eq!(algs.cipher_server_to_client(), cipher);
+    }
+    for mac in CTR_MACS {
+        let algs = password_login_with(
+            "JUSTSSH_SSHD_PASSWORD_ADDR",
+            "curve25519-sha256",
+            "aes256-ctr",
+            mac,
+        )
+        .await
+        .unwrap();
+        assert_eq!(algs.mac_server_to_client(), Some(*mac));
+    }
+}
+
+#[tokio::test]
+async fn the_client_logs_in_to_openssh_9_9_with_mlkem768x25519() {
+    let Some(algs) = password_login_with(
+        "JUSTSSH_SSHD_MLKEM_ADDR",
+        "mlkem768x25519-sha256",
+        "aes128-gcm@openssh.com",
+        "hmac-sha2-256",
+    )
+    .await
+    else {
+        return;
+    };
+    assert_eq!(algs.kex(), "mlkem768x25519-sha256");
+}
+
+#[tokio::test]
+async fn the_client_logs_in_to_sshd_without_strict_kex() {
+    for mac in ["hmac-sha2-256", "hmac-sha2-256-etm@openssh.com"] {
+        let Some(algs) = password_login_offering(
+            "JUSTSSH_SSHD_PASSWORD_ADDR",
+            "curve25519-sha256",
+            "aes128-ctr",
+            mac,
+            false,
+        )
+        .await
+        else {
+            return;
+        };
+        assert!(!algs.strict_kex(), "{mac}");
+    }
+}
