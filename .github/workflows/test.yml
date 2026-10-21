@@ -26,6 +26,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.25"
+          cache-dependency-path: ci/go-interop/go.sum
+
       - name: Start sshd for the client tests (crates/justssh-tokio/tests/sshd.rs)
         run: |
           if ! command -v sshd >/dev/null; then
@@ -46,7 +51,7 @@ jobs:
           UsePAM no
           PasswordAuthentication no
           KbdInteractiveAuthentication no'
-          printf '%s\nPort 2201\nPidFile /run/sshd-password.pid\nPubkeyAuthentication no\nUsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\nClientAliveInterval 1\nClientAliveCountMax 2\n' "$common" | sudo tee /etc/ssh/justssh-password.conf
+          printf '%s\nPort 2201\nPidFile /run/sshd-password.pid\nPubkeyAuthentication no\nUsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\nClientAliveInterval 1\nClientAliveCountMax 2\nKexAlgorithms +diffie-hellman-group14-sha256,diffie-hellman-group14-sha1\nMACs +hmac-sha1-96\n' "$common" | sudo tee /etc/ssh/justssh-password.conf
           printf '%s\nPort 2202\nPidFile /run/sshd-pam.pid\nPubkeyAuthentication no\nUsePAM yes\nPasswordAuthentication no\nKbdInteractiveAuthentication yes\n' "$common" | sudo tee /etc/ssh/justssh-pam.conf
           printf '%s\n%s\nPort 2204\nPidFile /run/sshd-keys.pid\n' "$common" "$keys" | sudo tee /etc/ssh/justssh-keys.conf
           printf '%s\n%s\nPort 2205\nPidFile /run/sshd-keys-ssh-rsa.pid\nPubkeyAcceptedAlgorithms ssh-rsa,ssh-rsa-cert-v01@openssh.com\n' "$common" "$keys" | sudo tee /etc/ssh/justssh-keys-ssh-rsa.conf
@@ -68,15 +73,28 @@ jobs:
           docker logs rhel9-sshd
           exit 1
 
+      - name: Start OpenSSH 9.9p2 (Alpine 3.21) for the client tests
+        run: |
+          docker run -d --name alpine-sshd -p 127.0.0.1:2206:22 docker.io/library/alpine:3.21@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507 sh -c \
+            "apk add -q 'openssh-server~9.9' && adduser -D justssh && echo 'justssh:justssh-ci-only' | chpasswd && ssh-keygen -A && exec /usr/sbin/sshd -D -e -o PasswordAuthentication=yes"
+          for _ in $(seq 300); do
+            docker logs alpine-sshd 2>&1 | grep -q 'Server listening' && exit 0
+            sleep 1
+          done
+          docker logs alpine-sshd
+          exit 1
+
       - name: Test
         env:
           JUSTSSH_REQUIRE_SSHD: "1"
+          JUSTSSH_REQUIRE_GO: "1"
           JUSTSSH_SSHD_PASSWORD_ADDR: 127.0.0.1:2201
           JUSTSSH_SSHD_PAM_ADDR: 127.0.0.1:2202
           JUSTSSH_SSHD_RHEL9_ADDR: 127.0.0.1:2203
           JUSTSSH_SSHD_KEYS_ADDR: 127.0.0.1:2204
           JUSTSSH_SSHD_SSH_RSA_ADDR: 127.0.0.1:2205
           JUSTSSH_SSHD_KEYS_DIR: /tmp/justssh-keys
+          JUSTSSH_SSHD_MLKEM_ADDR: 127.0.0.1:2206
           JUSTSSH_SSHD_USER: justssh
           JUSTSSH_SSHD_SECRET: justssh-ci-only
         run: cargo test --workspace

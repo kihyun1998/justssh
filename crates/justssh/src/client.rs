@@ -14,18 +14,18 @@ pub struct Client {
 
 impl Client {
     pub fn new(config: ClientConfig) -> Self {
-        Client {
-            transport: Transport::new(
-                Role::Client,
-                None,
-                Some(config.user),
-                config.rng,
-                config.version,
-                0,
-                config.channel_window,
-                config.channel_max_packet,
-            ),
-        }
+        let mut transport = Transport::new(
+            Role::Client,
+            None,
+            Some(config.user),
+            config.rng,
+            config.version,
+            0,
+            config.channel_window,
+            config.channel_max_packet,
+        );
+        transport.set_preference(config.preference);
+        Client { transport }
     }
 
     /// Sends `payload` as one packet, whatever it holds. For tests and fuzzing.

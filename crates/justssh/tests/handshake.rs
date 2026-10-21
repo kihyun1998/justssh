@@ -39,16 +39,10 @@ fn server_and_client_complete_the_key_exchange_and_reach_user_authentication() {
     assert_eq!(client.peer_host_key(), Some(&ed25519_host_key_blob()[..]));
 
     let algs = server.handshake().negotiated().expect("nothing negotiated");
-    assert_eq!(algs.kex(), "curve25519-sha256");
+    assert_eq!(algs.kex(), "mlkem768x25519-sha256");
     assert_eq!(algs.host_key(), "ssh-ed25519");
-    assert_eq!(
-        algs.cipher_client_to_server(),
-        "chacha20-poly1305@openssh.com"
-    );
-    assert_eq!(
-        algs.cipher_server_to_client(),
-        "chacha20-poly1305@openssh.com"
-    );
+    assert_eq!(algs.cipher_client_to_server(), "aes128-gcm@openssh.com");
+    assert_eq!(algs.cipher_server_to_client(), "aes128-gcm@openssh.com");
     assert!(algs.strict_kex());
     assert_eq!(client.handshake().negotiated(), Some(algs));
 }
@@ -85,7 +79,7 @@ fn both_versions_and_kexinits_are_kept_after_a_successful_handshake() {
 #[test]
 fn no_common_cipher_closes_with_both_kexinits_in_the_error() {
     let kexinit = client_kexinit(|k| {
-        k.encryption_algorithms_client_to_server = vec!["aes128-ctr".into()];
+        k.encryption_algorithms_client_to_server = vec!["3des-cbc".into()];
     });
     let mut input = CLIENT_VERSION.to_vec();
     input.extend(plain_packet(&kexinit));
@@ -176,7 +170,17 @@ fn a_right_first_kex_guess_is_answered() {
     input.extend(plain_packet(
         &Message::KexEcdhInit(KexEcdhInit::new(x25519_public(9))).encode(),
     ));
-    let out = feed_server(&input);
+    // A server whose first key exchange is the one the client guesses.
+    let mut server = server_with(|b| {
+        b.algorithms(
+            &["curve25519-sha256"],
+            &["chacha20-poly1305@openssh.com"],
+            &["hmac-sha2-256"],
+        )
+    });
+    let mut out = Out::default();
+    collect(server.process(Event::Connected), &mut out);
+    collect(server.process(Event::Received(&input)), &mut out);
     assert!(out.closed.is_none());
     assert!(matches!(
         plain_payloads(&out.bytes)

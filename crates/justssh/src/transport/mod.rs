@@ -13,7 +13,6 @@ use justssh_wire::{
     Disconnect, ExtInfo, KexEcdhInit, KexEcdhReply, KexInit, Message, NewKeys, Pong, Reader,
     ServiceAccept, ServiceRequest, Unimplemented, UserauthFailure, UserauthSuccess, number,
 };
-use x25519_dalek::{EphemeralSecret, PublicKey};
 use zeroize::Zeroizing;
 
 use crate::config::{BoxRng, HostKey};
@@ -23,7 +22,7 @@ use crate::handshake::{Handshake, KexInitRecord};
 use crate::key::PrivateKey;
 
 use allowed::{Stage, Verdict};
-use packet::{ChaChaKeys, Cipher, OpenError};
+use packet::{Cipher, OpenError};
 pub(crate) use userauth::Method;
 use userauth::{AfterFailure, ClientAuth, KeyAttempt, ServerAuth};
 use version::{Line, VersionError};
@@ -32,7 +31,7 @@ const USERAUTH: &str = "ssh-userauth";
 
 /// Most input held unprocessed while a verdict is pending: one largest packet with its length
 /// field and MAC.
-const PENDING_INPUT: usize = packet::MAX_PACKET + 4 + 16;
+const PENDING_INPUT: usize = packet::MAX_PACKET + 4 + packet::MAX_MAC;
 
 /// The `server-sig-algs` value sent in `SSH_MSG_EXT_INFO`: x/crypto/ssh's default public key
 /// authentication algorithms, in its order.
@@ -48,14 +47,58 @@ pub(crate) enum Role {
 
 /// A client's key exchange waiting for the consumer's host key verdict.
 struct PendingKex {
-    shared: Zeroizing<[u8; 32]>,
+    k: Zeroizing<Vec<u8>>,
     h: Vec<u8>,
+}
+
+/// The algorithm lists a side offers, and whether it offers strict KEX; other than the defaults
+/// only under `test-support`.
+#[derive(Clone)]
+pub(crate) struct Preference {
+    kex: Vec<String>,
+    cipher: Vec<String>,
+    mac: Vec<String>,
+    /// The server-to-client lists, where they differ from `cipher` and `mac`.
+    server_to_client: Option<(Vec<String>, Vec<String>)>,
+    pub(crate) strict_kex: bool,
+}
+
+fn names(l: &[&str]) -> Vec<String> {
+    l.iter().map(|s| (*s).to_owned()).collect()
+}
+
+impl Default for Preference {
+    fn default() -> Self {
+        Preference {
+            kex: names(negotiate::KEX),
+            cipher: names(negotiate::CIPHER),
+            mac: names(negotiate::MAC),
+            server_to_client: None,
+            strict_kex: true,
+        }
+    }
+}
+
+impl Preference {
+    /// Offers only `kex`, `ciphers` and `macs`, in that order.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn set_lists(&mut self, kex: &[&str], ciphers: &[&str], macs: &[&str]) {
+        self.kex = names(kex);
+        self.cipher = names(ciphers);
+        self.mac = names(macs);
+    }
+
+    /// Offers `ciphers` and `macs` for the server-to-client direction only.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn set_server_to_client(&mut self, ciphers: &[&str], macs: &[&str]) {
+        self.server_to_client = Some((names(ciphers), names(macs)));
+    }
 }
 
 /// Key exchange state that lives only until `SSH_MSG_NEWKEYS`.
 struct Exchange {
-    /// The client's ephemeral key and the public half already sent.
-    client: Option<(EphemeralSecret, [u8; 32])>,
+    /// The client's secret and its public value as hashed.
+    client: Option<(kex::ClientSecret, Vec<u8>)>,
     /// Keys for the incoming direction, taken into use on the peer's `SSH_MSG_NEWKEYS`.
     incoming: Option<Cipher>,
 }
@@ -92,6 +135,7 @@ pub(crate) struct Transport {
     host_key_pending: Option<PendingKex>,
     /// Whether a server answers `ext-info-c` with `SSH_MSG_EXT_INFO`.
     send_ext_info: bool,
+    preference: Option<Preference>,
     /// The extensions of the server's first `SSH_MSG_EXT_INFO`, received by a client.
     ext_info: Option<Vec<(String, Vec<u8>)>>,
     channels: Channels,
@@ -145,6 +189,7 @@ impl Transport {
             client_auth: client_user.map(ClientAuth::new),
             host_key_pending: None,
             send_ext_info: true,
+            preference: None,
             ext_info: None,
             channels: Channels::new(channel_window, channel_max_packet),
             #[cfg(feature = "test-support")]
@@ -169,6 +214,10 @@ impl Transport {
 
     pub(crate) fn set_send_ext_info(&mut self, send: bool) {
         self.send_ext_info = send;
+    }
+
+    pub(crate) fn set_preference(&mut self, preference: Option<Preference>) {
+        self.preference = preference;
     }
 
     pub(crate) fn phase(&self) -> Phase {
@@ -233,7 +282,7 @@ impl Transport {
             }
             Event::HostKeyAccepted if self.host_key_pending.is_some() => {
                 let pending = self.host_key_pending.take().expect("checked");
-                self.finish_exchange(&*pending.shared, &pending.h);
+                self.finish_exchange(&pending.k, &pending.h);
                 self.drain();
             }
             Event::HostKeyRejected if self.host_key_pending.is_some() => {
@@ -517,24 +566,31 @@ impl Transport {
     fn local_kexinit(&mut self) -> KexInit {
         let mut k = KexInit::default();
         self.rng.fill_bytes(&mut k.cookie);
-        let names = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        k.kex_algorithms = names(negotiate::KEX);
+        let preference = self.preference.clone().unwrap_or_default();
+        k.kex_algorithms = preference.kex;
         if self.role == Role::Client && self.session_id.is_none() {
             k.kex_algorithms.push(negotiate::EXT_INFO_CLIENT.to_owned());
         }
-        k.kex_algorithms.push(
-            match self.role {
-                Role::Server => negotiate::STRICT_SERVER,
-                Role::Client => negotiate::STRICT_CLIENT,
-            }
-            .to_owned(),
-        );
+        if preference.strict_kex {
+            k.kex_algorithms.push(
+                match self.role {
+                    Role::Server => negotiate::STRICT_SERVER,
+                    Role::Client => negotiate::STRICT_CLIENT,
+                }
+                .to_owned(),
+            );
+        }
         k.server_host_key_algorithms = match &self.host_key {
             Some(h) => vec![h.algorithm().to_owned()],
             None => names(negotiate::HOST_KEY),
         };
-        k.encryption_algorithms_client_to_server = names(negotiate::CIPHER);
-        k.encryption_algorithms_server_to_client = names(negotiate::CIPHER);
+        let (cipher_s2c, mac_s2c) = preference
+            .server_to_client
+            .unwrap_or_else(|| (preference.cipher.clone(), preference.mac.clone()));
+        k.encryption_algorithms_client_to_server = preference.cipher;
+        k.encryption_algorithms_server_to_client = cipher_s2c;
+        k.mac_algorithms_client_to_server = preference.mac;
+        k.mac_algorithms_server_to_client = mac_s2c;
         k.compression_algorithms_client_to_server = names(negotiate::COMPRESSION);
         k.compression_algorithms_server_to_client = names(negotiate::COMPRESSION);
         k
@@ -672,40 +728,44 @@ impl Transport {
             incoming: None,
         };
         if self.role == Role::Client {
-            let secret = EphemeralSecret::random_from_rng(&mut *self.rng);
-            let public = *PublicKey::from(&secret).as_bytes();
-            exchange.client = Some((secret, public));
+            let method = self.kex_method();
+            let start = kex::client_start(method, &mut *self.rng);
+            let hashed = kex::hashed_public(method, &start.public);
+            exchange.client = Some((start.secret, hashed));
             self.exchange = Some(exchange);
-            self.send(&Message::KexEcdhInit(KexEcdhInit::new(public.to_vec())));
+            self.send(&Message::KexEcdhInit(KexEcdhInit::new(start.public)));
         } else {
             self.exchange = Some(exchange);
         }
     }
 
-    fn peer_public(bytes: &[u8]) -> Option<PublicKey> {
-        <[u8; 32]>::try_from(bytes).ok().map(PublicKey::from)
+    /// The negotiated key exchange method.
+    fn kex_method(&self) -> kex::Method {
+        self.handshake
+            .negotiated
+            .as_ref()
+            .and_then(|a| kex::Method::from_name(&a.kex))
+            .expect("a key exchange this crate implements was negotiated")
     }
 
     fn on_ecdh_init(&mut self, q_c: &[u8]) {
-        let Some(client_public) = Self::peer_public(q_c) else {
+        let method = self.kex_method();
+        let Some((q_s, k)) = kex::server_respond(method, q_c, &mut *self.rng) else {
             return self.fail(DisconnectReason::KEY_EXCHANGE_FAILED, Error::KeyExchange);
         };
-        let secret = EphemeralSecret::random_from_rng(&mut *self.rng);
-        let q_s = *PublicKey::from(&secret).as_bytes();
-        let shared = Zeroizing::new(*secret.diffie_hellman(&client_public).as_bytes());
-        if shared.iter().all(|&b| b == 0) {
-            return self.fail(DisconnectReason::KEY_EXCHANGE_FAILED, Error::KeyExchange);
-        }
         let host_key = self.host_key.clone().expect("server has a host key");
         let k_s = host_key.public_blob();
-        let h = self.exchange_hash(&k_s, q_c, &q_s, &*shared);
+        let h = self.exchange_hash(
+            &k_s,
+            &kex::hashed_public(method, q_c),
+            &kex::hashed_public(method, &q_s),
+            &k,
+        );
         let signature = host_key.sign(&h);
         self.send(&Message::KexEcdhReply(KexEcdhReply::new(
-            k_s,
-            q_s.to_vec(),
-            signature,
+            k_s, q_s, signature,
         )));
-        self.finish_exchange(&*shared, &h);
+        self.finish_exchange(&k, &h);
     }
 
     fn on_ecdh_reply(&mut self, reply: &KexEcdhReply) {
@@ -717,14 +777,16 @@ impl Transport {
                 },
             );
         };
-        let Some(server_public) = Self::peer_public(&reply.q_s) else {
+        let method = self.kex_method();
+        let Some(k) = kex::client_finish(secret, &reply.q_s) else {
             return self.fail(DisconnectReason::KEY_EXCHANGE_FAILED, Error::KeyExchange);
         };
-        let shared = Zeroizing::new(*secret.diffie_hellman(&server_public).as_bytes());
-        if shared.iter().all(|&b| b == 0) {
-            return self.fail(DisconnectReason::KEY_EXCHANGE_FAILED, Error::KeyExchange);
-        }
-        let h = self.exchange_hash(&reply.host_key, &q_c, &reply.q_s, &*shared);
+        let h = self.exchange_hash(
+            &reply.host_key,
+            &q_c,
+            &kex::hashed_public(method, &reply.q_s),
+            &k,
+        );
         if !self.verify_host_signature(&reply.host_key, &reply.signature, &h) {
             return self.fail(
                 DisconnectReason::KEY_EXCHANGE_FAILED,
@@ -732,7 +794,7 @@ impl Transport {
             );
         }
         self.peer_host_key = Some(reply.host_key.clone());
-        self.host_key_pending = Some(PendingKex { shared, h });
+        self.host_key_pending = Some(PendingKex { k, h });
         self.actions.push(Action::VerifyHostKey {
             key: reply.host_key.clone(),
         });
@@ -769,7 +831,7 @@ impl Transport {
             .is_ok()
     }
 
-    fn exchange_hash(&self, k_s: &[u8], q_c: &[u8], q_s: &[u8], shared: &[u8]) -> Vec<u8> {
+    fn exchange_hash(&self, k_s: &[u8], q_c: &[u8], q_s: &[u8], k: &[u8]) -> Vec<u8> {
         let local_v = self.handshake.local_version.as_bytes();
         let peer_v = self
             .handshake
@@ -793,36 +855,64 @@ impl Transport {
             Role::Server => (peer_v, local_v, peer_i, local_i),
             Role::Client => (local_v, peer_v, local_i, peer_i),
         };
-        kex::exchange_hash(&kex::HashInput {
-            v_c,
-            v_s,
-            i_c,
-            i_s,
-            k_s,
-            q_c,
-            q_s,
-            shared,
-        })
+        kex::exchange_hash(
+            self.kex_method().hash(),
+            &kex::HashInput {
+                v_c,
+                v_s,
+                i_c,
+                i_s,
+                k_s,
+                q_c,
+                q_s,
+                k,
+            },
+        )
+    }
+
+    /// The packet protection for one direction, from key material derived with letters
+    /// `iv`, `iv + 2` and `iv + 4` (RFC 4253 §7.2).
+    fn direction_cipher(&self, k: &[u8], h: &[u8], session_id: &[u8], to_server: bool) -> Cipher {
+        let algs = self.handshake.negotiated.as_ref().expect("negotiated");
+        let (cipher, mac, iv) = if to_server {
+            (
+                &algs.cipher_client_to_server,
+                &algs.mac_client_to_server,
+                b'A',
+            )
+        } else {
+            (
+                &algs.cipher_server_to_client,
+                &algs.mac_server_to_client,
+                b'B',
+            )
+        };
+        let hash = self.kex_method().hash();
+        let sizes = packet::key_sizes(cipher, mac.as_deref());
+        let iv_bytes = kex::derive(hash, k, h, iv, session_id, sizes.iv);
+        let key = kex::derive(hash, k, h, iv + 2, session_id, sizes.key);
+        let mac_key = kex::derive(hash, k, h, iv + 4, session_id, sizes.mac);
+        Cipher::new(cipher, mac.as_deref(), &key, &iv_bytes, &mac_key)
     }
 
     /// Sends `SSH_MSG_NEWKEYS` and takes the new outgoing keys into use.
-    fn finish_exchange(&mut self, shared: &[u8], h: &[u8]) {
+    fn finish_exchange(&mut self, k: &[u8], h: &[u8]) {
         let first = self.session_id.is_none();
         let session_id = self.session_id.get_or_insert_with(|| h.to_vec()).clone();
-        let client_to_server = kex::derive(shared, h, b'C', &session_id, 64);
-        let server_to_client = kex::derive(shared, h, b'D', &session_id, 64);
+        let client_to_server = self.direction_cipher(k, h, &session_id, true);
+        let server_to_client = self.direction_cipher(k, h, &session_id, false);
         let (outgoing, incoming) = match self.role {
             Role::Server => (server_to_client, client_to_server),
             Role::Client => (client_to_server, server_to_client),
         };
         self.send(&Message::NewKeys(NewKeys::default()));
-        self.sealing = Cipher::ChaCha(ChaChaKeys::from_material(&outgoing));
+        self.sealing = outgoing;
         self.out_since_keys = 0;
         if self.strict() {
             self.out_seq = 0;
         }
         if let Some(e) = self.exchange.as_mut() {
-            e.incoming = Some(Cipher::ChaCha(ChaChaKeys::from_material(&incoming)));
+            e.incoming = Some(incoming);
         }
         self.stage = Stage::NewKeys;
         if first

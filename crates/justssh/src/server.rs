@@ -12,7 +12,7 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
-        let send_ext_info = config.send_ext_info;
+        let (send_ext_info, preference) = (config.send_ext_info, config.preference.clone());
         let mut server = Server {
             transport: Transport::new(
                 Role::Server,
@@ -26,6 +26,7 @@ impl Server {
             ),
         };
         server.transport.set_send_ext_info(send_ext_info);
+        server.transport.set_preference(preference);
         server
     }
 

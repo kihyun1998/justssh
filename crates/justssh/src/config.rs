@@ -61,6 +61,7 @@ impl fmt::Debug for HostKey {
 /// How a [`Server`](crate::Server) runs.
 pub struct ServerConfig {
     pub(crate) host_key: HostKey,
+    pub(crate) preference: Option<crate::transport::Preference>,
     pub(crate) send_ext_info: bool,
     pub(crate) rng: BoxRng,
     pub(crate) version: String,
@@ -82,6 +83,7 @@ impl ServerConfig {
     pub fn builder(host_key: HostKey) -> ServerConfigBuilder {
         ServerConfigBuilder {
             host_key,
+            preference: None,
             send_ext_info: true,
             rng: None,
             version: None,
@@ -95,6 +97,7 @@ impl ServerConfig {
 /// Builds a [`ServerConfig`].
 pub struct ServerConfigBuilder {
     host_key: HostKey,
+    preference: Option<crate::transport::Preference>,
     send_ext_info: bool,
     rng: Option<BoxRng>,
     version: Option<String>,
@@ -132,6 +135,15 @@ impl ServerConfigBuilder {
     /// x/crypto/ssh's `MaxAuthTries` default. The client's first `none` request does not count.
     pub fn max_auth_tries(mut self, limit: NonZeroU32) -> Self {
         self.max_auth_tries = limit.get();
+        self
+    }
+
+    /// Offers only `kex`, `ciphers` and `macs`, in that order. For tests only.
+    #[cfg(feature = "test-support")]
+    pub fn algorithms(mut self, kex: &[&str], ciphers: &[&str], macs: &[&str]) -> Self {
+        self.preference
+            .get_or_insert_with(Default::default)
+            .set_lists(kex, ciphers, macs);
         self
     }
 
@@ -176,6 +188,7 @@ impl ServerConfigBuilder {
     pub fn build(self) -> ServerConfig {
         ServerConfig {
             host_key: self.host_key,
+            preference: self.preference,
             send_ext_info: self.send_ext_info,
             rng: self.rng.unwrap_or_else(system_rng),
             version: format!("SSH-2.0-{}", self.version.as_deref().unwrap_or("justssh")),
@@ -189,6 +202,7 @@ impl ServerConfigBuilder {
 /// How a [`Client`](crate::Client) runs.
 pub struct ClientConfig {
     pub(crate) user: Vec<u8>,
+    pub(crate) preference: Option<crate::transport::Preference>,
     pub(crate) rng: BoxRng,
     pub(crate) version: String,
     pub(crate) channel_window: u32,
@@ -200,6 +214,7 @@ impl ClientConfig {
     pub fn builder(user: &[u8]) -> ClientConfigBuilder {
         ClientConfigBuilder {
             user: user.to_vec(),
+            preference: None,
             rng: None,
             channel_window: DEFAULT_CHANNEL_WINDOW,
             channel_max_packet: DEFAULT_CHANNEL_MAX_PACKET,
@@ -210,12 +225,41 @@ impl ClientConfig {
 /// Builds a [`ClientConfig`].
 pub struct ClientConfigBuilder {
     user: Vec<u8>,
+    preference: Option<crate::transport::Preference>,
     rng: Option<BoxRng>,
     channel_window: u32,
     channel_max_packet: u32,
 }
 
 impl ClientConfigBuilder {
+    /// Offers only `kex`, `ciphers` and `macs`, in that order. For tests only.
+    #[cfg(feature = "test-support")]
+    pub fn algorithms(mut self, kex: &[&str], ciphers: &[&str], macs: &[&str]) -> Self {
+        self.preference
+            .get_or_insert_with(Default::default)
+            .set_lists(kex, ciphers, macs);
+        self
+    }
+
+    /// Offers `ciphers` and `macs` for the server-to-client direction only. For tests only.
+    #[cfg(feature = "test-support")]
+    pub fn server_to_client(mut self, ciphers: &[&str], macs: &[&str]) -> Self {
+        self.preference
+            .get_or_insert_with(Default::default)
+            .set_server_to_client(ciphers, macs);
+        self
+    }
+
+    /// Whether to offer strict KEX (`kex-strict-c-v00@openssh.com`). Defaults to true. For
+    /// tests only.
+    #[cfg(feature = "test-support")]
+    pub fn strict_kex(mut self, offer: bool) -> Self {
+        self.preference
+            .get_or_insert_with(Default::default)
+            .strict_kex = offer;
+        self
+    }
+
     /// The window each channel starts with. Defaults to 2 MiB, as x/crypto/ssh.
     ///
     /// # Panics
@@ -250,6 +294,7 @@ impl ClientConfigBuilder {
     pub fn build(self) -> ClientConfig {
         ClientConfig {
             user: self.user,
+            preference: self.preference,
             rng: self.rng.unwrap_or_else(system_rng),
             channel_window: self.channel_window,
             channel_max_packet: self.channel_max_packet,

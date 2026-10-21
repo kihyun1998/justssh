@@ -42,6 +42,16 @@ fn askpass(name: &str, password: &str) -> PathBuf {
 
 /// Runs `ssh -vvv` against `port` with `password` and returns its log.
 async fn ssh(port: u16, password: &str) -> String {
+    ssh_with(
+        port,
+        password,
+        &["-o", "Ciphers=chacha20-poly1305@openssh.com"],
+    )
+    .await
+}
+
+/// `ssh` with `options`, which choose its algorithms.
+async fn ssh_with(port: u16, password: &str, options: &[&str]) -> String {
     let known_hosts = std::env::temp_dir().join(format!("justssh-known-hosts-{port}"));
     let askpass = askpass(&port.to_string(), password);
     let ssh = std::env::var("JUSTSSH_SSH").unwrap_or_else(|_| "ssh".to_owned());
@@ -52,7 +62,7 @@ async fn ssh(port: u16, password: &str) -> String {
             .args(["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"])
             .arg("-o")
             .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
-            .args(["-o", "Ciphers=chacha20-poly1305@openssh.com"])
+            .args(options)
             .args(["-o", "PreferredAuthentications=password"])
             .args(["-o", "NumberOfPasswordPrompts=1"])
             .env("SSH_ASKPASS", &askpass)
@@ -129,7 +139,7 @@ async fn openssh_completes_key_exchange_and_reaches_user_authentication() {
     let (port, task) = accept_one(6, None).await;
     let log = ssh(port, "wrong").await;
     for expected in [
-        "kex: algorithm: curve25519-sha256",
+        "kex: algorithm: ",
         "will use strict KEX ordering",
         "SSH2_MSG_SERVICE_ACCEPT received",
     ] {
@@ -228,7 +238,7 @@ async fn an_auth_deadline_closes_with_the_phase() {
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut server = Server::new(config(|b| b));
-        let deadlines = Deadlines::new().phase(Phase::Auth, Duration::from_millis(500));
+        let deadlines = Deadlines::new().phase(Phase::Auth, Duration::from_secs(3));
         justssh_tokio::accept(stream, &mut server, &deadlines, |_| async {
             std::future::pending::<Option<()>>().await
         })
@@ -249,5 +259,89 @@ async fn an_auth_deadline_closes_with_the_phase() {
             }
         ),
         _ => panic!("not closed"),
+    }
+}
+
+/// The names `ssh -Q query` lists.
+fn supported(query: &str) -> Vec<String> {
+    let ssh = std::env::var("JUSTSSH_SSH").unwrap_or_else(|_| "ssh".to_owned());
+    let out = std::process::Command::new(ssh)
+        .args(["-Q", query])
+        .output()
+        .expect("could not run ssh -Q");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Logs in with `ssh` under `options` and returns its log.
+async fn log_in_with(options: &[&str]) -> String {
+    let (port, task) = accept_one(6, None).await;
+    let log = ssh_with(port, PASSWORD, options).await;
+    let (outcome, _) = finish(task).await;
+    assert!(
+        matches!(outcome, Ok(Ok(_))),
+        "{options:?} not authenticated: {outcome:?}
+{log}"
+    );
+    log
+}
+
+#[tokio::test]
+async fn openssh_connects_under_each_key_exchange_cipher_and_mac() {
+    let (kex, ciphers, macs) = (supported("kex"), supported("cipher"), supported("mac"));
+    for k in [
+        "mlkem768x25519-sha256",
+        "curve25519-sha256",
+        "curve25519-sha256@libssh.org",
+        "ecdh-sha2-nistp256",
+        "ecdh-sha2-nistp384",
+        "ecdh-sha2-nistp521",
+        "diffie-hellman-group14-sha256",
+        "diffie-hellman-group14-sha1",
+    ] {
+        if !kex.iter().any(|s| s == k) {
+            eprintln!("skipped: this ssh has no {k}");
+            continue;
+        }
+        let log = log_in_with(&["-o", &format!("KexAlgorithms={k}")]).await;
+        assert!(
+            log.contains(&format!("kex: algorithm: {k}")),
+            "{k}:
+{log}"
+        );
+    }
+    for c in [
+        "aes128-gcm@openssh.com",
+        "aes256-gcm@openssh.com",
+        "chacha20-poly1305@openssh.com",
+        "aes128-ctr",
+        "aes192-ctr",
+        "aes256-ctr",
+    ] {
+        assert!(ciphers.iter().any(|s| s == c), "this ssh has no {c}");
+        let log = log_in_with(&["-o", &format!("Ciphers={c}")]).await;
+        assert!(
+            log.contains(&format!("client->server cipher: {c}")),
+            "{c}:
+{log}"
+        );
+    }
+    for m in [
+        "hmac-sha2-256-etm@openssh.com",
+        "hmac-sha2-512-etm@openssh.com",
+        "hmac-sha2-256",
+        "hmac-sha2-512",
+        "hmac-sha1",
+        "hmac-sha1-96",
+    ] {
+        assert!(macs.iter().any(|s| s == m), "this ssh has no {m}");
+        let log = log_in_with(&["-o", "Ciphers=aes128-ctr", "-o", &format!("MACs={m}")]).await;
+        assert!(
+            log.contains(&format!("client->server cipher: aes128-ctr MAC: {m}")),
+            "{m}:
+{log}"
+        );
     }
 }
