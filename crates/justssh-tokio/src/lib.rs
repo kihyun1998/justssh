@@ -94,9 +94,12 @@ where
     let mut buf = vec![0u8; 32 * 1024];
     let mut accepted = None;
     let mut events = Vec::new();
+    let mut deadline = None;
     let mut actions = server.process(Event::Connected);
     loop {
-        let deadline = deadlines.until(start, server.phase());
+        if server.phase() != Phase::Closed {
+            deadline = deadlines.until(start, server.phase());
+        }
         let mut out = Vec::new();
         let mut pending = None;
         let mut closed = None;
@@ -109,8 +112,18 @@ where
             }
         }
         if !out.is_empty() && !write(&mut io, &out, deadline).await? {
-            actions = server.process(Event::DeadlineExceeded);
-            continue;
+            let closed = closed.or_else(|| {
+                server
+                    .process(Event::DeadlineExceeded)
+                    .into_iter()
+                    .find_map(|a| match a {
+                        Action::Closed(c) => Some(c),
+                        _ => None,
+                    })
+            });
+            return Ok(Accepted::Closed(
+                closed.expect("a deadline ends the connection"),
+            ));
         }
         if let Some(closed) = closed {
             return Ok(Accepted::Closed(closed));

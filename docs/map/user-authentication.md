@@ -42,9 +42,9 @@ A failure read in the same batch as keyboard-interactive questions cancels them:
 
 Running out of methods returns `Connected::NoMethodLeft` with the methods tried and the last ones the server allowed, after sending `SSH_MSG_DISCONNECT` reason 14; x/crypto/ssh's error carries the same lists ("attempted methods [none], no supported methods remain"), and acwbroker diagnosed its PAM-only nodes from that text (`ssh_dialer.go`).
 
-## A deadline ends connect even when the peer reads nothing
+## A deadline ends connect and accept even when the peer reads nothing
 
-A deadline stays in force after the core has closed, so the `SSH_MSG_DISCONNECT` that a passed deadline produces is written under it too; a write that does not finish in time ends `connect` with the `Closed` it already has, without trying the write again. Both are tested with a pipe the peer never reads. `justssh_tokio::accept` writes the same way but drops the `Closed` and writes the `DISCONNECT` with no deadline.
+A deadline stays in force after the core has closed, so the `SSH_MSG_DISCONNECT` that a passed deadline produces is written under it too; a write that does not finish in time ends `connect` with the `Closed` it already has, or the one the deadline gives, without trying the write again. `justssh_tokio::accept` does the same (#29). `connect` is tested with pipes of 8 and 24 bytes the peer never reads, `accept` with one the peer never reads and one whose peer takes the server's first flight and then stops, so the `DISCONNECT` finds no room; before the fix `accept` was still waiting after ten seconds in both.
 
 ## A key is queried before it signs
 
