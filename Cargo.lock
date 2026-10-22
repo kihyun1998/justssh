@@ -668,6 +668,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "justssh-broker"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "justssh",
+ "justssh-keys",
+ "zeroize",
+]
+
+[[package]]
 name = "justssh-keys"
 version = "0.1.0"
 dependencies = [
