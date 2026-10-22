@@ -1,7 +1,12 @@
-# justssh workspace: wire / core / tokio adapter (ADR-0003).
+# justssh workspace: wire / core / tokio adapter, and key files on top (ADR-0003).
 [workspace]
 resolver = "2"
-members = ["crates/justssh-wire", "crates/justssh", "crates/justssh-tokio"]
+members = [
+    "crates/justssh-wire",
+    "crates/justssh",
+    "crates/justssh-tokio",
+    "crates/justssh-keys",
+]
 exclude = ["ci/coexist"]
 
 [workspace.package]
@@ -13,6 +18,7 @@ repository = "https://github.com/kihyun1998/justssh"
 [workspace.dependencies]
 justssh-wire = { path = "crates/justssh-wire" }
 justssh = { path = "crates/justssh" }
+justssh-keys = { path = "crates/justssh-keys" }
 
 tokio = { version = "1", default-features = false }
 proptest = "1"
@@ -47,3 +53,9 @@ zeroize = { version = "1", features = ["derive"] }
 [workspace.lints.clippy]
 exhaustive_enums = "deny"
 exhaustive_structs = "deny"
+
+# bcrypt-pbkdf is slow unoptimised, and the key file tests run it up to its round limit.
+[profile.dev.package.bcrypt-pbkdf]
+opt-level = 3
+[profile.dev.package.blowfish]
+opt-level = 3
