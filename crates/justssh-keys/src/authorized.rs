@@ -85,7 +85,7 @@ fn after_options(line: &[u8]) -> Option<&[u8]> {
 
 /// `bytes` without the white space at either end that Go's `bytes.TrimSpace` takes off: ASCII
 /// white space and, in UTF-8, any character Unicode counts as white space.
-fn trim_space(mut bytes: &[u8]) -> &[u8] {
+pub(crate) fn trim_space(mut bytes: &[u8]) -> &[u8] {
     while let Some(len) = space_at(bytes, true) {
         bytes = &bytes[len..];
     }

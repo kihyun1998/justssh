@@ -51,36 +51,13 @@ pub(crate) fn decode(text: &[u8], passphrase: Option<&[u8]>) -> Result<KeyFile, 
     Ok(key)
 }
 
-/// The container inside the armor of `text`, which may hold other text around it.
+/// The container in the first PEM block of `text`, found as Go's `pem.Decode` finds it, which
+/// must be an OpenSSH private key.
 fn unarmor(text: &[u8]) -> Result<Zeroizing<Vec<u8>>, KeyFileError> {
-    let start = line_start(text, BEGIN).ok_or(KeyFileError::NotThisFormat)? + BEGIN.len();
-    let len = find(&text[start..], END).ok_or(KeyFileError::Malformed)?;
-    let body = &text[start..start + len];
-    let mut base64 = Zeroizing::new(Vec::with_capacity(body.len()));
-    base64.extend(body.iter().filter(|b| !b.is_ascii_whitespace()));
-    let mut bin = Zeroizing::new(vec![0; base64.len() / 4 * 3]);
-    let n = Base64::decode(&base64[..], &mut bin)
-        .map_err(|_| KeyFileError::Malformed)?
-        .len();
-    bin.truncate(n);
-    Ok(bin)
-}
-
-/// Where `line` starts a line of `text`.
-fn line_start(text: &[u8], line: &[u8]) -> Option<usize> {
-    let mut from = 0;
-    while let Some(at) = find(&text[from..], line) {
-        let at = from + at;
-        if at == 0 || text[at - 1] == b'\n' {
-            return Some(at);
-        }
-        from = at + 1;
+    match crate::pem::first_block(text) {
+        Some(block) if block.label == b"OPENSSH PRIVATE KEY" => Ok(block.body),
+        _ => Err(KeyFileError::NotThisFormat),
     }
-    None
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Whether `cipher` and `kdf` are ones x/crypto/ssh reads: bcrypt with AES-256 in CTR or CBC mode.

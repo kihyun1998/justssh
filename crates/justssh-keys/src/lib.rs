@@ -1,10 +1,11 @@
 //! Private key files for justssh: OpenSSH private keys read, with or without a passphrase, and
-//! written, and PuTTY's PPK files read, each as a [`KeyFile`] that yields the core's
+//! written, PuTTY's PPK files and PEM keys read, each as a [`KeyFile`] that yields the core's
 //! [`PrivateKey`]; and certificates given as `authorized_keys` lines.
 
 mod authorized;
 mod base64;
 mod openssh;
+mod pem;
 mod ppk;
 
 use core::fmt;
@@ -91,6 +92,31 @@ impl KeyFile {
         openssh::decode(text, passphrase)
     }
 
+    /// Reads a PEM private key: PKCS#1 (`RSA PRIVATE KEY`), PKCS#8 (`PRIVATE KEY`) or SEC1
+    /// (`EC PRIVATE KEY`), decrypting a legacy encrypted block (`Proc-Type`, `DEK-Info`) with
+    /// `passphrase`.
+    pub fn from_pem(text: &[u8], passphrase: Option<&[u8]>) -> Result<Self, KeyFileError> {
+        pem::decode(text, passphrase)
+    }
+
+    /// Reads a key file of whichever format it is, as acwbroker tells them apart: PuTTY's by its
+    /// first line, and otherwise the first PEM block, an OpenSSH key or another PEM key.
+    pub fn read(text: &[u8], passphrase: Option<&[u8]>) -> Result<Self, KeyFileError> {
+        let start = text
+            .iter()
+            .position(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            .unwrap_or(text.len());
+        if text[start..].starts_with(b"PuTTY-User-Key-File-") {
+            return Self::from_ppk(text, passphrase);
+        }
+        match pem::first_block(text) {
+            Some(block) if block.label == b"OPENSSH PRIVATE KEY" => {
+                Self::from_openssh(text, passphrase)
+            }
+            _ => Self::from_pem(text, passphrase),
+        }
+    }
+
     /// Reads a PuTTY private key file (`PuTTY-User-Key-File-2` or `-3`), decrypting it with
     /// `passphrase` when it is encrypted; a passphrase given for one that is not is not used.
     pub fn from_ppk(text: &[u8], passphrase: Option<&[u8]>) -> Result<Self, KeyFileError> {
@@ -133,7 +159,7 @@ fn crt_coefficient(p: &[u8], q: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
 }
 
 /// A secret big-endian integer, reversed in a zeroizing buffer so that no plain copy is left.
-fn secret_uint(be: &[u8]) -> rsa::BigUint {
+pub(crate) fn secret_uint(be: &[u8]) -> rsa::BigUint {
     let mut le = Zeroizing::new(be.to_vec());
     le.reverse();
     rsa::BigUint::from_bytes_le(&le)
