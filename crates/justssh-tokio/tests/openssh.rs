@@ -476,6 +476,11 @@ async fn serve_output(config: ServerConfig) -> (u16, JoinHandle<()>) {
                     for _ in 0..OUTPUT / 1000 {
                         session.data(channel, &[b'x'; 1000]).await.unwrap();
                     }
+                    // A second of handling input before the channel closes.
+                    let _ = timeout(Duration::from_secs(1), async {
+                        while let Ok(Some(_)) = session.next().await {}
+                    })
+                    .await;
                     session
                         .request(channel, "exit-status", false, 0u32.to_be_bytes().to_vec())
                         .await
