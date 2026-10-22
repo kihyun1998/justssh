@@ -1,0 +1,17 @@
+[package]
+name = "justssh-broker"
+description = "The minimal broker acwbroker's blackbox harness drives: acwbroker's handoff pipe over justssh"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+justssh.workspace = true
+justssh-keys.workspace = true
+getrandom = { workspace = true, features = ["sys_rng"] }
+zeroize.workspace = true
+
+[lints]
+workspace = true

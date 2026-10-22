@@ -1,4 +1,4 @@
-# justssh workspace: wire / core / tokio adapter, and key files on top (ADR-0003).
+# justssh workspace: wire / core / tokio adapter, key files on top, and the unpublished broker (ADR-0003).
 [workspace]
 resolver = "2"
 members = [
@@ -6,6 +6,7 @@ members = [
     "crates/justssh",
     "crates/justssh-tokio",
     "crates/justssh-keys",
+    "crates/justssh-broker",
 ]
 exclude = ["ci/coexist"]
 
