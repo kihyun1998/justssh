@@ -54,8 +54,12 @@ zeroize = { version = "1", features = ["derive"] }
 exhaustive_enums = "deny"
 exhaustive_structs = "deny"
 
-# bcrypt-pbkdf is slow unoptimised, and the key file tests run it up to its round limit.
+# The key derivations are slow unoptimised, and the key file tests run them many times.
 [profile.dev.package.bcrypt-pbkdf]
 opt-level = 3
 [profile.dev.package.blowfish]
+opt-level = 3
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
 opt-level = 3

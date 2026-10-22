@@ -1,9 +1,11 @@
 //! Private key files for justssh: OpenSSH private keys read, with or without a passphrase, and
-//! written, each as a [`KeyFile`] that yields the core's [`PrivateKey`]; and certificates given
-//! as `authorized_keys` lines.
+//! written, and PuTTY's PPK files read, each as a [`KeyFile`] that yields the core's
+//! [`PrivateKey`]; and certificates given as `authorized_keys` lines.
 
 mod authorized;
+mod base64;
 mod openssh;
+mod ppk;
 
 use core::fmt;
 
@@ -89,6 +91,12 @@ impl KeyFile {
         openssh::decode(text, passphrase)
     }
 
+    /// Reads a PuTTY private key file (`PuTTY-User-Key-File-2` or `-3`), decrypting it with
+    /// `passphrase` when it is encrypted; a passphrase given for one that is not is not used.
+    pub fn from_ppk(text: &[u8], passphrase: Option<&[u8]>) -> Result<Self, KeyFileError> {
+        ppk::decode(text, passphrase)
+    }
+
     /// The key as an unencrypted OpenSSH private key file.
     pub fn to_openssh(&self) -> Zeroizing<String> {
         openssh::encode(self)
@@ -153,6 +161,10 @@ pub enum KeyFileError {
     MultipleKeys,
     /// The key is of a type this crate does not read, such as `ssh-dss`.
     UnsupportedKeyType(String),
+    /// The file is of a version of its format this crate does not read.
+    UnsupportedVersion(u32),
+    /// The key derivation asks for more memory or work than is allowed.
+    KdfTooCostly,
     /// The key material does not form a valid key, or its public half does not match it.
     InvalidKey,
 }
@@ -160,7 +172,7 @@ pub enum KeyFileError {
 impl fmt::Display for KeyFileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            KeyFileError::NotThisFormat => f.write_str("not an OpenSSH private key"),
+            KeyFileError::NotThisFormat => f.write_str("not a key file of this format"),
             KeyFileError::Malformed => f.write_str("malformed private key file"),
             KeyFileError::PassphraseNeeded => {
                 f.write_str("the key is encrypted; a passphrase is needed")
@@ -175,6 +187,10 @@ impl fmt::Display for KeyFileError {
             }
             KeyFileError::MultipleKeys => f.write_str("more than one key in the file"),
             KeyFileError::UnsupportedKeyType(name) => write!(f, "unsupported key type {name:?}"),
+            KeyFileError::UnsupportedVersion(v) => write!(f, "unsupported key file version {v}"),
+            KeyFileError::KdfTooCostly => {
+                f.write_str("the key derivation asks for more work than allowed")
+            }
             KeyFileError::InvalidKey => f.write_str("invalid private key"),
         }
     }
