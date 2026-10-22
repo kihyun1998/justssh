@@ -12,7 +12,7 @@ Every request with want_reply must be answered; that is the consumer's contract,
 
 OpenSSH's `ServerAliveInterval` sends `keepalive@openssh.com` with want_reply set (`clientloop.c` `server_alive_check`) and gives up after `ServerAliveCountMax` unanswered ones ("Timeout, server … not responding", exit 255). Refusing it counts as an answer. Measured on #6 by `crates/justssh-tokio/tests/keepalive.rs`: with the reply removed and `ServerAliveCountMax=2`, ssh prints that line and exits 255.
 
-The tokio `Session` cannot answer while `data` or `extended_data` waits for the peer's window: requests read meanwhile are kept for `next`. Measured on #6: an ssh whose stdout nobody reads, sent 64 MiB, got no keepalive answered in 3.3 s and exited 255. x/crypto/ssh answers from another goroutine while a `Write` waits. Tracked in #26.
+The tokio `Session` cannot answer while `data` or `extended_data` waits for the peer's window: requests read meanwhile are kept for `next`. Measured on #6: an ssh whose stdout nobody reads, sent 64 MiB, got no keepalive answered in 3.3 s and exited 255. x/crypto/ssh answers from another goroutine while a `Write` waits. A consumer that queues with `queue_data` and waits in `next` answers them: `keepalive.rs` has that ssh answered four times while output waits (see `channels.md`).
 
 ## Sent requests do not wait for channels
 
