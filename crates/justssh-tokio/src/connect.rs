@@ -251,6 +251,9 @@ where
             return Ok(Connected::Closed(closed));
         }
         if client.phase() == Phase::Connected {
+            if let Some(key) = host_key {
+                events.push(Action::VerifyHostKey { key });
+            }
             return Ok(Connected::Authenticated { io, events });
         }
 

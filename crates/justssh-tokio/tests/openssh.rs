@@ -11,7 +11,7 @@ use justssh::{
     Closed, DisconnectReason, EcdsaCurve, Error, HostKey, Phase, PrivateKey, Server, ServerConfig,
     ServerConfigBuilder, Zeroizing,
 };
-use justssh_tokio::{Accepted, Deadlines};
+use justssh_tokio::{Accepted, Deadlines, Session};
 use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::Notify;
@@ -434,4 +434,133 @@ async fn openssh_verifies_each_host_key_algorithm_of_the_server() {
 async fn openssh_offering_only_ssh_rsa_connects_to_the_go_brokers_host_keys() {
     let config = config(|b| b.host_key(HostKey::new(rsa()).with_algorithms(&["ssh-rsa"]).unwrap()));
     log_in_under_host_key(config, "ssh-rsa").await;
+}
+
+/// Bytes the server prints for an `exec`.
+const OUTPUT: usize = 300_000;
+
+/// Serves one connection with `config`: an `exec` on a session channel prints [`OUTPUT`] bytes
+/// and exits 0; everything else is refused.
+async fn serve_output(config: ServerConfig) -> (u16, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut server = Server::new(config);
+        let accepted = justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
+            let ok = r.password() == PASSWORD.as_bytes();
+            async move { ok.then_some(()) }
+        })
+        .await
+        .unwrap();
+        let Accepted::Authenticated { io, events, .. } = accepted else {
+            panic!("{accepted:?}");
+        };
+        let mut session = Session::new(io, server, events);
+        loop {
+            let Ok(Some(action)) = session.next().await else {
+                return;
+            };
+            match action {
+                justssh::Action::ChannelOpenRequest(r) => {
+                    session
+                        .accept_channel(r.channel(), Vec::new())
+                        .await
+                        .unwrap();
+                }
+                justssh::Action::ChannelRequest(r) if r.kind() == "exec" => {
+                    let channel = r.channel();
+                    if let Some(token) = r.reply() {
+                        session.reply(token, true).await.unwrap();
+                    }
+                    for _ in 0..OUTPUT / 1000 {
+                        session.data(channel, &[b'x'; 1000]).await.unwrap();
+                    }
+                    session
+                        .request(channel, "exit-status", false, 0u32.to_be_bytes().to_vec())
+                        .await
+                        .unwrap();
+                    session.eof(channel).await.unwrap();
+                    session.close(channel).await.unwrap();
+                }
+                justssh::Action::ChannelRequest(r) => {
+                    if let Some(token) = r.reply() {
+                        session.reply(token, false).await.unwrap();
+                    }
+                }
+                justssh::Action::GlobalRequest(r) => {
+                    if let Some(token) = r.reply() {
+                        session
+                            .reply_global(token, false, Vec::new())
+                            .await
+                            .unwrap();
+                    }
+                }
+                justssh::Action::Closed(_) => return,
+                _ => {}
+            }
+        }
+    });
+    (port, task)
+}
+
+/// `ssh` with `options` running a command on a server from [`serve_output`]; the bytes it
+/// printed and its log.
+async fn ssh_output(config: ServerConfig, options: &[&str]) -> (usize, String) {
+    let (port, task) = serve_output(config).await;
+    let askpass = askpass(&format!("out{port}"), PASSWORD);
+    let known_hosts = std::env::temp_dir().join(format!("justssh-known-hosts-out-{port}"));
+    let ssh = std::env::var("JUSTSSH_SSH").unwrap_or_else(|_| "ssh".to_owned());
+    let output = timeout(
+        LIMIT,
+        Command::new(ssh)
+            .args(["-vvv", "-F", "none", "-p", &port.to_string()])
+            .args(["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"])
+            .arg("-o")
+            .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
+            .args(options)
+            .args(["-o", "PreferredAuthentications=password"])
+            .args(["-o", "NumberOfPasswordPrompts=1"])
+            .env("SSH_ASKPASS", &askpass)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", ":0")
+            .stdin(Stdio::null())
+            .args(["justssh@127.0.0.1", "print"])
+            .output(),
+    )
+    .await
+    .expect("ssh did not finish")
+    .expect("could not run ssh");
+    let _ = std::fs::remove_file(&known_hosts);
+    let _ = std::fs::remove_file(&askpass);
+    let log = String::from_utf8_lossy(&output.stderr).into_owned();
+    timeout(LIMIT, task)
+        .await
+        .expect("server did not finish")
+        .unwrap();
+    (output.stdout.len(), log)
+}
+
+#[tokio::test]
+async fn the_server_answers_the_rekeys_openssh_starts_with_a_low_rekey_limit() {
+    let (printed, log) = ssh_output(config(|b| b), &["-o", "RekeyLimit=4K"]).await;
+    assert_eq!(printed, OUTPUT, "{log}");
+    let exchanges = log.matches("SSH2_MSG_NEWKEYS received").count();
+    assert!(
+        exchanges >= 2,
+        "{exchanges} key exchanges:
+{log}"
+    );
+}
+
+#[tokio::test]
+async fn openssh_answers_the_rekeys_the_server_starts_after_a_low_threshold() {
+    let (printed, log) = ssh_output(config(|b| b.rekey_threshold(4096)), &[]).await;
+    assert_eq!(printed, OUTPUT, "{log}");
+    let exchanges = log.matches("SSH2_MSG_NEWKEYS received").count();
+    assert!(
+        exchanges > 10,
+        "{exchanges} key exchanges:
+{log}"
+    );
 }

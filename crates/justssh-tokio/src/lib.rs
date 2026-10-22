@@ -274,9 +274,14 @@ where
         self.drain(channel).await
     }
 
-    /// Reads until nothing is queued for `channel`, it has closed, or the connection has.
+    /// Reads until nothing is queued for `channel`, it has closed, the connection has, or a key
+    /// re-exchange waits for the host key to be judged.
     async fn drain(&mut self, channel: ChannelId) -> io::Result<()> {
         while self.endpoint.phase() != Phase::Closed
+            && !self
+                .events
+                .iter()
+                .any(|a| matches!(a, Action::VerifyHostKey { .. }))
             && self
                 .endpoint
                 .channel_info(channel)
@@ -290,6 +295,27 @@ where
             self.send(actions).await?;
         }
         Ok(())
+    }
+
+    /// Starts a key re-exchange, as the endpoint's `rekey`. A timer that rekeys every so often
+    /// calls this.
+    pub async fn rekey(&mut self) -> io::Result<()> {
+        let actions = self.endpoint.rekey();
+        self.send(actions).await
+    }
+
+    /// Answers the [`Action::VerifyHostKey`] a client's key re-exchange handed over from
+    /// [`next`](Session::next): `accept` takes the key and the exchange goes on; otherwise the
+    /// connection ends. Until it is answered nothing more from the peer is handled. Accepting without
+    /// checking takes any key, a different one included, as x/crypto/ssh's callback would.
+    pub async fn answer_host_key(&mut self, accept: bool) -> io::Result<()> {
+        let event = if accept {
+            Event::HostKeyAccepted
+        } else {
+            Event::HostKeyRejected
+        };
+        let actions = self.endpoint.process(event);
+        self.send(actions).await
     }
 
     pub async fn eof(&mut self, channel: ChannelId) -> io::Result<()> {
