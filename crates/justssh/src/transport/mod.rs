@@ -200,6 +200,7 @@ impl Transport {
                 peer_version: None,
                 local_kexinit: None,
                 peer_kexinit: None,
+                undecoded_peer_kexinit: None,
                 negotiated: None,
             },
             in_seq: 0,
@@ -747,7 +748,12 @@ impl Transport {
         }
         let message = match Message::decode(payload) {
             Ok(m) => m,
-            Err(e) => return self.fail(DisconnectReason::PROTOCOL_ERROR, Error::Decode(e)),
+            Err(e) => {
+                if n == number::KEXINIT {
+                    self.handshake.undecoded_peer_kexinit = Some(payload.to_vec());
+                }
+                return self.fail(DisconnectReason::PROTOCOL_ERROR, Error::Decode(e));
+            }
         };
         match message {
             Message::Disconnect(d) => {
