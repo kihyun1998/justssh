@@ -54,6 +54,7 @@ pub trait Endpoint: sealed::Sealed {
     ) -> Vec<Action>;
     fn channel_consumed(&mut self, channel: ChannelId, bytes: u32) -> Vec<Action>;
     fn channel_info(&self, channel: ChannelId) -> Option<ChannelInfo>;
+    fn rekey(&mut self) -> Vec<Action>;
 }
 
 /// The connection-protocol methods, written once for both roles; expands inside `impl` blocks
@@ -188,6 +189,12 @@ macro_rules! connection_methods {
         pub fn channel_info(&self, channel: $crate::ChannelId) -> Option<$crate::ChannelInfo> {
             self.transport.channel_info(channel)
         }
+
+        /// Starts a key re-exchange. Nothing happens before the first key exchange ends or while
+        /// one is under way; what is sent meanwhile waits for it to end.
+        pub fn rekey(&mut self) -> Vec<Action> {
+            self.transport.rekey()
+        }
     };
 }
 
@@ -281,6 +288,9 @@ macro_rules! impl_endpoint {
             }
             fn channel_info(&self, channel: $crate::ChannelId) -> Option<$crate::ChannelInfo> {
                 <$t>::channel_info(self, channel)
+            }
+            fn rekey(&mut self) -> Vec<Action> {
+                <$t>::rekey(self)
             }
         }
     };

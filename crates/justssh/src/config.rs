@@ -89,6 +89,7 @@ pub struct ServerConfig {
     pub(crate) max_auth_tries: u32,
     pub(crate) channel_window: u32,
     pub(crate) channel_max_packet: u32,
+    pub(crate) rekey_threshold: Option<u64>,
 }
 
 /// x/crypto/ssh's channel window: 64 maximum packets.
@@ -112,6 +113,7 @@ impl ServerConfig {
             max_auth_tries: 6,
             channel_window: DEFAULT_CHANNEL_WINDOW,
             channel_max_packet: DEFAULT_CHANNEL_MAX_PACKET,
+            rekey_threshold: None,
         }
     }
 }
@@ -126,9 +128,18 @@ pub struct ServerConfigBuilder {
     max_auth_tries: u32,
     channel_window: u32,
     channel_max_packet: u32,
+    rekey_threshold: Option<u64>,
 }
 
 impl ServerConfigBuilder {
+    /// Exchanges keys again after this many bytes in either direction, as x/crypto/ssh's
+    /// `RekeyThreshold`: 0 keeps the default of 64 GiB under AES and 1 GiB under other ciphers,
+    /// and less than 256 counts as 256. Keys are also exchanged again after 2^31 packets.
+    pub fn rekey_threshold(mut self, bytes: u64) -> Self {
+        self.rekey_threshold = (bytes > 0).then(|| bytes.max(256));
+        self
+    }
+
     /// Adds `key`, offered after the keys already added; it replaces an added key of the same
     /// format, as x/crypto/ssh's `AddHostKey`.
     pub fn host_key(mut self, key: HostKey) -> Self {
@@ -231,6 +242,7 @@ impl ServerConfigBuilder {
             max_auth_tries: self.max_auth_tries,
             channel_window: self.channel_window,
             channel_max_packet: self.channel_max_packet,
+            rekey_threshold: self.rekey_threshold,
         }
     }
 }
@@ -243,6 +255,7 @@ pub struct ClientConfig {
     pub(crate) version: String,
     pub(crate) channel_window: u32,
     pub(crate) channel_max_packet: u32,
+    pub(crate) rekey_threshold: Option<u64>,
 }
 
 impl ClientConfig {
@@ -254,6 +267,7 @@ impl ClientConfig {
             rng: None,
             channel_window: DEFAULT_CHANNEL_WINDOW,
             channel_max_packet: DEFAULT_CHANNEL_MAX_PACKET,
+            rekey_threshold: None,
         }
     }
 }
@@ -265,9 +279,18 @@ pub struct ClientConfigBuilder {
     rng: Option<BoxRng>,
     channel_window: u32,
     channel_max_packet: u32,
+    rekey_threshold: Option<u64>,
 }
 
 impl ClientConfigBuilder {
+    /// Exchanges keys again after this many bytes in either direction, as x/crypto/ssh's
+    /// `RekeyThreshold`: 0 keeps the default of 64 GiB under AES and 1 GiB under other ciphers,
+    /// and less than 256 counts as 256. Keys are also exchanged again after 2^31 packets.
+    pub fn rekey_threshold(mut self, bytes: u64) -> Self {
+        self.rekey_threshold = (bytes > 0).then(|| bytes.max(256));
+        self
+    }
+
     /// Offers only `kex`, `ciphers` and `macs`, in that order. For tests only.
     #[cfg(feature = "test-support")]
     pub fn algorithms(mut self, kex: &[&str], ciphers: &[&str], macs: &[&str]) -> Self {
@@ -343,6 +366,7 @@ impl ClientConfigBuilder {
             rng: self.rng.unwrap_or_else(system_rng),
             channel_window: self.channel_window,
             channel_max_packet: self.channel_max_packet,
+            rekey_threshold: self.rekey_threshold,
             version: "SSH-2.0-justssh".to_owned(),
         }
     }

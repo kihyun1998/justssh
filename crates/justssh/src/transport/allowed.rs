@@ -42,7 +42,10 @@ pub(crate) fn verdict(role: Role, stage: Stage, n: u8, strict_initial: bool) -> 
     match n {
         number::DISCONNECT => Accept,
         number::IGNORE | number::DEBUG | number::UNIMPLEMENTED => accept_if(!strict_initial),
-        number::KEXINIT => accept_if(stage == Stage::KexInit),
+        number::KEXINIT => accept_if(matches!(
+            stage,
+            Stage::KexInit | Stage::Service | Stage::Auth | Stage::Connected
+        )),
         number::KEX_ECDH_INIT => accept_if(role == Role::Server && stage == Stage::KexEcdh),
         number::KEX_ECDH_REPLY => accept_if(role == Role::Client && stage == Stage::KexEcdh),
         number::NEWKEYS => accept_if(stage == Stage::NewKeys),

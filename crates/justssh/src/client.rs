@@ -25,6 +25,7 @@ impl Client {
             config.channel_max_packet,
         );
         transport.set_preference(config.preference);
+        transport.set_rekey_threshold(config.rekey_threshold);
         Client { transport }
     }
 
