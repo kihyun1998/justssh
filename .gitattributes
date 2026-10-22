@@ -1,5 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 
-# Key files made by ssh-keygen for tests, kept byte for byte.
+# Key files made by ssh-keygen, WinSCP and PuTTYgen for tests, kept byte for byte.
 crates/justssh-keys/tests/keys/* -text
+crates/justssh-keys/tests/ppk/* -text
