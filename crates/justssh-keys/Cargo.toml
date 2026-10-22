@@ -1,6 +1,6 @@
 [package]
 name = "justssh-keys"
-description = "Private key files for justssh: OpenSSH keys read and written, PPK keys read"
+description = "Private key files for justssh: OpenSSH keys read and written, PPK and PEM keys read"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 justssh.workspace = true
 justssh-wire.workspace = true
-aes.workspace = true
+aes = { workspace = true, features = ["zeroize"] }
 ctr.workspace = true
 cbc = { version = "0.2", features = ["zeroize"] }
 bcrypt-pbkdf = { version = "0.11", features = ["zeroize"] }
@@ -19,6 +19,10 @@ argon2 = { version = "0.6", default-features = false, features = ["alloc", "zero
 hmac.workspace = true
 sha1.workspace = true
 sha2.workspace = true
+pkcs8 = "0.11"
+sec1 = "0.8"
+des = { version = "0.9", features = ["zeroize"] }
+md-5 = { version = "0.11", features = ["zeroize"] }
 # The big integers rsa 0.9 uses, for the CRT coefficient a written RSA key stores.
 num-bigint-dig = { version = "0.8", features = ["zeroize"] }
 getrandom = { workspace = true, features = ["sys_rng"] }

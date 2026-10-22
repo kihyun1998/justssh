@@ -512,6 +512,9 @@ fn keys_dir() -> Option<String> {
         for (name, _) in KEY_FILES {
             lines.push_str(&std::fs::read_to_string(key_file(&format!("{name}.pub"))).unwrap());
         }
+        for name in PEM_FILES {
+            lines.push_str(&std::fs::read_to_string(pem_file(&format!("{name}.pub"))).unwrap());
+        }
         for (name, encrypted) in PPK_FILES {
             let source = std::fs::read(ppk_file(&format!("{name}.openssh"))).unwrap();
             let key = justssh_keys::KeyFile::from_openssh(
@@ -649,6 +652,49 @@ fn ppk_file(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../justssh-keys/tests/ppk")
         .join(name)
+}
+
+/// The PEM key files `ssh-keygen` and `openssl` made for `justssh-keys`' tests that an SSH
+/// client signs with; those whose names say `aes` or `des` are encrypted (`correct horse`).
+const PEM_FILES: [&str; 12] = [
+    "rsa-pkcs1",
+    "rsa-pkcs1-aes128",
+    "rsa-pkcs1-des",
+    "rsa-pkcs1-des3",
+    "rsa-pkcs8",
+    "ec256-sec1",
+    "ec256-sec1-aes192",
+    "ec256-sec1-aes256",
+    "ec384-sec1-aes128",
+    "ec521-sec1",
+    "ec256-pkcs8",
+    "ed25519-pkcs8",
+];
+
+fn pem_file(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../justssh-keys/tests/pem")
+        .join(name)
+}
+
+#[tokio::test]
+async fn logs_in_to_sshd_with_the_pem_files_ssh_keygen_and_openssl_wrote() {
+    for name in PEM_FILES {
+        let encrypted = name.contains("aes") || name.contains("des");
+        let text = std::fs::read(pem_file(name)).unwrap();
+        let key = justssh_keys::KeyFile::read(&text, encrypted.then_some(&b"correct horse"[..]))
+            .unwrap()
+            .private_key()
+            .clone();
+        let Some((connected, _)) = log_in_with_keys("JUSTSSH_SSHD_KEYS_ADDR", vec![key]).await
+        else {
+            return;
+        };
+        assert!(
+            matches!(connected, Connected::Authenticated { .. }),
+            "{name}: {connected:?}"
+        );
+    }
 }
 
 #[tokio::test]

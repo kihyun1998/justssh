@@ -953,3 +953,56 @@ async fn go_reads_each_certificate_line_as_justssh_keys_does() {
     }
     assert!(differ.is_empty(), "{differ:#?}");
 }
+
+#[tokio::test]
+async fn go_reads_each_pem_key_as_justssh_keys_does() {
+    let Some(go) = harness() else {
+        return;
+    };
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../justssh-keys/tests/pem");
+    let mut differ = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        if name.ends_with(".pub") || name.ends_with(".md") {
+            continue;
+        }
+        let encrypted = ["aes", "des", "encrypted"].iter().any(|s| name.contains(s));
+        let passphrase = if encrypted { "correct horse" } else { "" };
+        let out = std::process::Command::new(&go)
+            .args([
+                "readkey",
+                "-in",
+                path.to_str().unwrap(),
+                "-passphrase",
+                passphrase,
+            ])
+            .output()
+            .unwrap();
+        let go_read = out
+            .status
+            .success()
+            .then(|| String::from_utf8(out.stdout).unwrap());
+        let read = justssh_keys::KeyFile::read(
+            &std::fs::read(&path).unwrap(),
+            encrypted.then_some(passphrase.as_bytes()),
+        )
+        .ok()
+        .map(|k| authorized_line(&k.private_key().plain_public_blob()));
+        // A key of three primes and a DSA key are refused by the maintainer's choice on #45,
+        // where Go reads them.
+        let expected = if name == "rsa-pkcs1-3primes" || name == "dsa" {
+            None
+        } else {
+            go_read.clone()
+        };
+        if read != expected {
+            differ.push(format!(
+                "{name}: Go {:?}, justssh-keys {:?}",
+                go_read.is_some(),
+                read.is_some()
+            ));
+        }
+    }
+    assert!(differ.is_empty(), "{differ:#?}");
+}
