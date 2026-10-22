@@ -97,6 +97,10 @@ pub enum Action {
     ChannelEof { channel: ChannelId },
     /// The channel is closed in both directions and its id is free.
     ChannelClosed { channel: ChannelId },
+    /// Everything that waited on `channel` for its open, the peer's window or a key exchange
+    /// has been sent. Not reported when nothing had to wait, nor once the channel has closed;
+    /// more may have been queued by the time it is handed over.
+    ChannelDrained { channel: ChannelId },
     /// The reply to the channel request this side sent with `token`; a failure too when the
     /// channel closed, was aborted or was refused before the peer replied.
     ChannelRequestReply {

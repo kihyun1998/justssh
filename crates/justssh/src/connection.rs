@@ -343,7 +343,7 @@ impl Channels {
         self.paused = false;
         let mut steps = Vec::new();
         for c in self.open.values_mut() {
-            flush(c, &mut steps);
+            flush_waited(c, &mut steps);
         }
         steps
     }
@@ -437,7 +437,7 @@ impl Channels {
                     }
                 }
                 if !paused {
-                    flush(c, &mut steps);
+                    flush_waited(c, &mut steps);
                 }
             }
             Message::ChannelData(d) => self.data(d.recipient, None, d.data, &mut steps),
@@ -539,8 +539,9 @@ impl Channels {
                     data: m.data,
                 }));
                 if !self.paused {
-                    flush(c, &mut steps);
+                    flush_waited(c, &mut steps);
                 }
+                send_replied_requests(c, &mut steps);
             }
             Message::ChannelOpenFailure(m) => {
                 let Some(c) = self.open.get_mut(&m.recipient).filter(|c| c.opening) else {
@@ -728,13 +729,24 @@ impl Channels {
             return (None, steps);
         };
         let token = want_reply.then_some(RequestToken { connection, seq });
-        c.queue.push_back(Out::Request(
-            kind.to_owned(),
-            want_reply.then_some(seq),
-            data,
-        ));
-        if !self.paused {
-            flush(c, &mut steps);
+        let closing = c.queue.iter().any(|o| matches!(o, Out::Close));
+        if want_reply && c.accepted && !closing {
+            c.awaiting.push_back(seq);
+            steps.push(Step::Send(Message::ChannelRequest(WireRequest::new(
+                c.peer_id,
+                kind.to_owned(),
+                true,
+                data,
+            ))));
+        } else {
+            c.queue.push_back(Out::Request(
+                kind.to_owned(),
+                want_reply.then_some(seq),
+                data,
+            ));
+            if !self.paused {
+                flush(c, &mut steps);
+            }
         }
         if want_reply {
             self.next_seq += 1;
@@ -872,6 +884,36 @@ pub(crate) enum OutKind {
     Extended(u32, Vec<u8>),
     Eof,
     Close,
+}
+
+/// Sends the requests wanting a reply still queued on `c` ahead of any close, ahead of what
+/// waits before them.
+fn send_replied_requests(c: &mut Channel, steps: &mut Vec<Step>) {
+    let mut i = 0;
+    while i < c.queue.len() {
+        match &c.queue[i] {
+            Out::Close => return,
+            Out::Request(_, Some(_), _) => {
+                let Some(Out::Request(kind, Some(seq), data)) = c.queue.remove(i) else {
+                    unreachable!()
+                };
+                c.awaiting.push_back(seq);
+                steps.push(Step::Send(Message::ChannelRequest(WireRequest::new(
+                    c.peer_id, kind, true, data,
+                ))));
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+/// [`flush`], reporting [`Action::ChannelDrained`] when what had waited is all sent.
+fn flush_waited(c: &mut Channel, steps: &mut Vec<Step>) {
+    let waited = !c.queue.is_empty();
+    flush(c, steps);
+    if waited && c.queue.is_empty() && !c.sent_close {
+        steps.push(Step::Emit(Action::ChannelDrained { channel: c.this }));
+    }
 }
 
 /// Sends from the front of `c`'s queue for as long as the peer's window allows, once the channel
