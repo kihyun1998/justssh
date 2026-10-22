@@ -12,6 +12,7 @@ pub struct Handshake {
     pub(crate) peer_version: Option<String>,
     pub(crate) local_kexinit: Option<KexInitRecord>,
     pub(crate) peer_kexinit: Option<KexInitRecord>,
+    pub(crate) undecoded_peer_kexinit: Option<Vec<u8>>,
     pub(crate) negotiated: Option<Algorithms>,
 }
 
@@ -32,6 +33,12 @@ impl Handshake {
 
     pub fn peer_kexinit(&self) -> Option<&KexInitRecord> {
         self.peer_kexinit.as_ref()
+    }
+
+    /// The payload of a peer `SSH_MSG_KEXINIT` that could not be decoded, message number
+    /// included, as received.
+    pub fn undecoded_peer_kexinit(&self) -> Option<&[u8]> {
+        self.undecoded_peer_kexinit.as_deref()
     }
 
     pub fn negotiated(&self) -> Option<&Algorithms> {

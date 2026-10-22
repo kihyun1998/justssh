@@ -65,6 +65,7 @@ fn both_versions_and_kexinits_are_kept_after_a_successful_handshake() {
     let h = server.handshake();
     assert_eq!(h.local_version(), "SSH-2.0-justssh");
     assert_eq!(h.peer_version(), Some("SSH-2.0-justssh"));
+    assert_eq!(h.undecoded_peer_kexinit(), None);
     let peer = h.peer_kexinit().unwrap();
     assert_eq!(
         peer.raw(),
@@ -444,4 +445,69 @@ fn the_client_refuses_an_all_zero_server_key() {
     let (reason, error) = expect_local_close(&out);
     assert_eq!(reason, DisconnectReason::KEY_EXCHANGE_FAILED);
     assert_eq!(error, Error::KeyExchange);
+}
+
+/// A KEXINIT of `len` bytes whose first name-list is not UTF-8, so it cannot be decoded.
+fn undecodable_kexinit(len: usize) -> Vec<u8> {
+    let names = len - 21;
+    let mut p = vec![20];
+    p.extend([3; 16]);
+    p.extend((names as u32).to_be_bytes());
+    p.extend(std::iter::repeat_n(0xff, names));
+    p
+}
+
+/// A server fed the client's version and `kexinit`, and what it did.
+fn server_fed_kexinit(kexinit: &[u8]) -> (justssh::Server, Out) {
+    let mut input = CLIENT_VERSION.to_vec();
+    input.extend(plain_packet(kexinit));
+    let mut server = server();
+    let mut out = Out::default();
+    collect(server.process(Event::Connected), &mut out);
+    collect(server.process(Event::Received(&input)), &mut out);
+    (server, out)
+}
+
+#[test]
+fn a_kexinit_that_cannot_be_decoded_is_kept_as_received() {
+    let mut kexinit = client_kexinit(|_| {});
+    kexinit.truncate(kexinit.len() - 3);
+    let (server, out) = server_fed_kexinit(&kexinit);
+    let (reason, error) = expect_local_close(&out);
+    assert_eq!(reason, DisconnectReason::PROTOCOL_ERROR);
+    assert!(matches!(error, Error::Decode(_)), "{error:?}");
+    let h = server.handshake();
+    assert_eq!(h.undecoded_peer_kexinit(), Some(&kexinit[..]));
+    assert!(h.peer_kexinit().is_none());
+    assert_eq!(h.peer_version(), Some("SSH-2.0-test"));
+}
+
+#[test]
+fn an_undecodable_kexinit_is_kept_whole_up_to_the_largest_packet() {
+    // 262,135 bytes of payload make a packet of exactly 256 KiB with 4 bytes of padding.
+    let kexinit = undecodable_kexinit(262_135);
+    let (server, out) = server_fed_kexinit(&kexinit);
+    assert!(matches!(expect_local_close(&out).1, Error::Decode(_)));
+    assert_eq!(
+        server.handshake().undecoded_peer_kexinit(),
+        Some(&kexinit[..])
+    );
+
+    let (server, out) = server_fed_kexinit(&undecodable_kexinit(262_143));
+    assert!(matches!(expect_local_close(&out).1, Error::MalformedPacket));
+    assert_eq!(server.handshake().undecoded_peer_kexinit(), None);
+}
+
+#[test]
+fn another_message_that_cannot_be_decoded_is_not_kept_as_a_kexinit() {
+    let mut input = CLIENT_VERSION.to_vec();
+    input.extend(plain_packet(&client_kexinit(|_| {})));
+    input.extend(plain_packet(&[30, 0, 0]));
+    let mut server = server();
+    let mut out = Out::default();
+    collect(server.process(Event::Connected), &mut out);
+    collect(server.process(Event::Received(&input)), &mut out);
+    assert!(matches!(expect_local_close(&out).1, Error::Decode(_)));
+    assert_eq!(server.handshake().undecoded_peer_kexinit(), None);
+    assert!(server.handshake().peer_kexinit().is_some());
 }
