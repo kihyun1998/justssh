@@ -10,5 +10,6 @@ publish = false
 [dependencies]
 justssh = { path = "../../crates/justssh" }
 justssh-tokio = { path = "../../crates/justssh-tokio" }
+justssh-keys = { path = "../../crates/justssh-keys" }
 # Devolutions/IronRDP master, 2026-10-20.
 ironrdp = { git = "https://github.com/Devolutions/IronRDP", rev = "66bfd60ed3e6663188980259377b2da5f4c9a9aa", features = ["connector", "acceptor", "session", "server"] }

@@ -732,3 +732,158 @@ async fn a_go_client_naming_requests_and_a_channel_type_in_bytes_that_are_not_ut
     let names: Vec<&[u8]> = names.iter().map(|n| n.as_bytes()).collect();
     assert_eq!(names, [NAME; 3]);
 }
+
+/// What the harness printed for `args`, which must succeed.
+fn go_output(go: &PathBuf, args: &[&str]) -> String {
+    let out = std::process::Command::new(go).args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "go-interop {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// `blob`'s authorized_keys line without a comment, as Go's `MarshalAuthorizedKey` writes it.
+fn authorized_line(blob: &[u8]) -> String {
+    let key_type = justssh_wire::Reader::new(blob).utf8().unwrap().to_owned();
+    format!(
+        "{key_type} {}\n",
+        <base64ct::Base64 as base64ct::Encoding>::encode_string(blob)
+    )
+}
+
+/// A Go client with `args` against a server with `config`; what the client printed.
+async fn go_client_printing(go: &PathBuf, args: &[&str], config: ServerConfig) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let child = Command::new(go)
+        .arg("client")
+        .args(["-addr", &addr])
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let (stream, _) = timeout(LIMIT, listener.accept()).await.unwrap().unwrap();
+    let mut server = Server::new(config);
+    let accepted = timeout(
+        LIMIT,
+        justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
+            let ok = r.user() == b"alice" && r.password() == b"pw";
+            async move { ok.then_some(()) }
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        matches!(accepted, Accepted::Authenticated { .. }),
+        "{accepted:?}"
+    );
+    let out = timeout(LIMIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "Go client: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn the_server_presents_the_host_key_a_go_broker_wrote_as_the_go_broker_does() {
+    let Some(go) = harness() else {
+        return;
+    };
+    for (key_type, only) in [("ed25519", None), ("rsa", Some("ssh-rsa"))] {
+        let path = std::env::temp_dir().join(format!(
+            "justssh-go-hostkey-{key_type}-{}",
+            std::process::id()
+        ));
+        let file = path.to_str().unwrap();
+        let go_public = go_output(&go, &["hostkey", "-type", key_type, "-out", file]);
+        let text = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let key = justssh_keys::KeyFile::from_openssh(&text, None).unwrap();
+        assert_eq!(key.comment(), b"acwbroker");
+        let mut host_key = HostKey::new(key.private_key().clone());
+        let mut args = vec!["-printhostkey"];
+        if let Some(algorithm) = only {
+            host_key = host_key.with_algorithms(&[algorithm]).unwrap();
+            args.extend(["-hostkeyalgs", algorithm]);
+        }
+        let printed = go_client_printing(&go, &args, ServerConfig::builder(host_key).build()).await;
+        assert_eq!(
+            printed.lines().next(),
+            go_public.lines().next(),
+            "{key_type}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn go_reads_the_key_files_justssh_keys_writes() {
+    let Some(go) = harness() else {
+        return;
+    };
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../justssh-keys/tests/keys");
+    for (name, passphrase) in [
+        ("ed25519", None),
+        ("ed25519-pass", Some(&b"correct horse"[..])),
+        ("ecdsa256", None),
+        ("ecdsa384", None),
+        ("ecdsa521-pass-cbc", Some(&b"correct horse"[..])),
+        ("rsa2048", None),
+        ("rsa3072-pass", Some(&b"correct horse"[..])),
+    ] {
+        let key = justssh_keys::KeyFile::from_openssh(
+            &std::fs::read(dir.join(name)).unwrap(),
+            passphrase,
+        )
+        .unwrap();
+        let path = std::env::temp_dir().join(format!("justssh-key-{name}-{}", std::process::id()));
+        std::fs::write(&path, key.to_openssh().as_bytes()).unwrap();
+        let go_public = go_output(&go, &["readkey", "-in", path.to_str().unwrap()]);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            go_public,
+            authorized_line(&key.private_key().plain_public_blob()),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn justssh_keys_reads_what_ssh_keygen_and_go_read_alike() {
+    let Some(go) = harness() else {
+        return;
+    };
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../justssh-keys/tests/keys");
+    for (name, passphrase) in [("ed25519-pass", "correct horse"), ("rsa2048", "")] {
+        let path = dir.join(name);
+        let go_public = go_output(
+            &go,
+            &[
+                "readkey",
+                "-in",
+                path.to_str().unwrap(),
+                "-passphrase",
+                passphrase,
+            ],
+        );
+        let key = justssh_keys::KeyFile::from_openssh(
+            &std::fs::read(&path).unwrap(),
+            (!passphrase.is_empty()).then_some(passphrase.as_bytes()),
+        )
+        .unwrap();
+        assert_eq!(
+            go_public,
+            authorized_line(&key.private_key().plain_public_blob()),
+            "{name}"
+        );
+    }
+}

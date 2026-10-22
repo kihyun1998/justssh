@@ -1,7 +1,9 @@
 // Command go-interop runs one x/crypto/ssh v0.55 connection against justssh for its tests.
 //
 //	go-interop server -kex K -cipher C -mac M -hostkeys H -rekey N -serve   listens on 127.0.0.1, prints the port, serves one connection
-//	go-interop client -addr A -kex K -cipher C -mac M -hostkeyalgs A -rekey N -requests R -namehex H   connects once
+//	go-interop client -addr A -kex K -cipher C -mac M -hostkeyalgs A -rekey N -requests R -namehex H -printhostkey   connects once
+//	go-interop hostkey -type ed25519|rsa -out F   writes a host key as acwbroker does, prints its public key
+//	go-interop readkey -in F -passphrase P   reads a private key file, prints its public key
 //
 // Empty -kex, -cipher, -mac and -hostkeyalgs leave x/crypto/ssh's defaults; -rekey sets
 // RekeyThreshold. With -requests the client sends R global requests of 1 KiB wanting a reply
@@ -24,6 +26,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/hex"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"net"
@@ -55,6 +58,11 @@ func main() {
 	rekey := fs.Uint64("rekey", 0, "RekeyThreshold in bytes")
 	requests := fs.Int("requests", 0, "global requests the client sends (client)")
 	stay := fs.Bool("serve", false, "stay until the client leaves (server)")
+	printHostKey := fs.Bool("printhostkey", false, "print the host key the server presented, as an authorized_keys line (client)")
+	keyType := fs.String("type", "ed25519", "the host key to generate: ed25519 or rsa (hostkey)")
+	out := fs.String("out", "", "the file to write (hostkey)")
+	in := fs.String("in", "", "the key file to read (readkey)")
+	passphrase := fs.String("passphrase", "", "the passphrase of the key file (readkey)")
 	nameHex := fs.String("namehex", "", "hex name of a global request, channel type and channel request the client sends, each wanting success (client)")
 	_ = fs.Parse(os.Args[2:])
 	algorithms := ssh.Config{
@@ -71,8 +79,12 @@ func main() {
 	case "client":
 		var name []byte
 		if name, err = hex.DecodeString(*nameHex); err == nil {
-			err = connect(*addr, algorithms, list(*hostKeyAlgs), *requests, string(name))
+			err = connect(*addr, algorithms, list(*hostKeyAlgs), *requests, string(name), *printHostKey)
 		}
+	case "hostkey":
+		err = writeHostKey(*keyType, *out)
+	case "readkey":
+		err = readKey(*in, *passphrase)
 	default:
 		err = fmt.Errorf("unknown mode %q", os.Args[1])
 	}
@@ -171,13 +183,20 @@ func serve(algorithms ssh.Config, hostKeys string, stay bool) error {
 	return sconn.Close()
 }
 
-func connect(addr string, algorithms ssh.Config, hostKeyAlgs []string, requests int, name string) error {
+func connect(addr string, algorithms ssh.Config, hostKeyAlgs []string, requests int, name string, printHostKey bool) error {
+	hostKeyCallback := ssh.InsecureIgnoreHostKey()
+	if printHostKey {
+		hostKeyCallback = func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			fmt.Print(string(ssh.MarshalAuthorizedKey(key)))
+			return nil
+		}
+	}
 	config := &ssh.ClientConfig{
 		Config:            algorithms,
 		HostKeyAlgorithms: hostKeyAlgs,
 		User:              "alice",
 		Auth:              []ssh.AuthMethod{ssh.Password("pw")},
-		HostKeyCallback:   ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback:   hostKeyCallback,
 	}
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -211,4 +230,59 @@ func connect(addr string, algorithms ssh.Config, hostKeyAlgs []string, requests 
 		_ = ch.Close()
 	}
 	return cconn.Close()
+}
+
+// writeHostKey generates a host key and writes it to out as acwbroker's hostkey.FileStore does
+// (ssh.MarshalPrivateKey, comment "acwbroker"), then prints its public key.
+func writeHostKey(keyType, out string) error {
+	var priv any
+	switch keyType {
+	case "ed25519":
+		_, k, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return err
+		}
+		priv = k
+	case "rsa":
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			return err
+		}
+		priv = k
+	default:
+		return fmt.Errorf("unknown key type %q", keyType)
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "acwbroker")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(out, pem.EncodeToMemory(block), 0o600); err != nil {
+		return err
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		return err
+	}
+	fmt.Print(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	return nil
+}
+
+// readKey reads the private key file in, as acwbroker's upstream dialer does, and prints its
+// public key.
+func readKey(in, passphrase string) error {
+	b, err := os.ReadFile(in)
+	if err != nil {
+		return err
+	}
+	var signer ssh.Signer
+	if passphrase != "" {
+		signer, err = ssh.ParsePrivateKeyWithPassphrase(b, []byte(passphrase))
+	} else {
+		signer, err = ssh.ParsePrivateKey(b)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Print(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	return nil
 }
