@@ -22,7 +22,7 @@ pub use event::{
     Action, Closed, DisconnectReason, Error, Event, InfoRequest, PasswordRequest, Phase, Prompt,
 };
 pub use handshake::{AlgorithmCategory, Algorithms, Handshake, KexInitRecord};
-pub use justssh_wire::DecodeError;
+pub use justssh_wire::{DecodeError, Name};
 pub use key::{EcdsaCurve, KeyError, PrivateKey};
 pub use rand_core;
 pub use server::Server;

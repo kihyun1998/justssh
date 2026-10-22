@@ -19,7 +19,7 @@ pub trait Endpoint: sealed::Sealed {
     fn process(&mut self, event: Event<'_>) -> Vec<Action>;
     fn phase(&self) -> Phase;
     fn disconnect(&mut self, reason: DisconnectReason, description: &str) -> Vec<Action>;
-    fn open_channel(&mut self, kind: &str, data: Vec<u8>) -> (Option<ChannelId>, Vec<Action>);
+    fn open_channel(&mut self, kind: &[u8], data: Vec<u8>) -> (Option<ChannelId>, Vec<Action>);
     fn accept_channel(&mut self, channel: ChannelId, data: Vec<u8>) -> Vec<Action>;
     fn reject_channel(
         &mut self,
@@ -35,14 +35,14 @@ pub trait Endpoint: sealed::Sealed {
     fn channel_request(
         &mut self,
         channel: ChannelId,
-        kind: &str,
+        kind: &[u8],
         want_reply: bool,
         data: Vec<u8>,
     ) -> (Option<RequestToken>, Vec<Action>);
     fn reply_channel_request(&mut self, token: ReplyToken, ok: bool) -> Vec<Action>;
     fn global_request(
         &mut self,
-        kind: &str,
+        kind: &[u8],
         want_reply: bool,
         data: Vec<u8>,
     ) -> (Option<RequestToken>, Vec<Action>);
@@ -67,22 +67,23 @@ macro_rules! connection_methods {
         /// refused. Before authentication nothing is sent and the id is `None`.
         pub fn open_channel(
             &mut self,
-            kind: &str,
+            kind: impl AsRef<[u8]>,
             data: Vec<u8>,
         ) -> (Option<$crate::ChannelId>, Vec<Action>) {
-            self.transport.channels_with(|c| c.open_channel(kind, data))
+            self.transport
+                .channels_with(|c| c.open_channel(kind.as_ref(), data))
         }
 
         /// Sends a global request, opaque. When it wants a reply, the token returned comes back
         /// with it in [`Action::GlobalRequestReply`].
         pub fn global_request(
             &mut self,
-            kind: &str,
+            kind: impl AsRef<[u8]>,
             want_reply: bool,
             data: Vec<u8>,
         ) -> (Option<$crate::RequestToken>, Vec<Action>) {
             self.transport
-                .channels_with(|c| c.global_request(kind, want_reply, data))
+                .channels_with(|c| c.global_request(kind.as_ref(), want_reply, data))
         }
 
         /// Answers a global request with `data` after the message number. Replies leave in the
@@ -161,12 +162,12 @@ macro_rules! connection_methods {
         pub fn channel_request(
             &mut self,
             channel: $crate::ChannelId,
-            kind: &str,
+            kind: impl AsRef<[u8]>,
             want_reply: bool,
             data: Vec<u8>,
         ) -> (Option<$crate::RequestToken>, Vec<Action>) {
             self.transport
-                .channels_with(|c| c.request(channel, kind, want_reply, data))
+                .channels_with(|c| c.request(channel, kind.as_ref(), want_reply, data))
         }
 
         /// Answers a channel request. Replies leave in the order the requests arrived, whatever
@@ -215,7 +216,7 @@ macro_rules! impl_endpoint {
             }
             fn open_channel(
                 &mut self,
-                kind: &str,
+                kind: &[u8],
                 data: Vec<u8>,
             ) -> (Option<$crate::ChannelId>, Vec<Action>) {
                 <$t>::open_channel(self, kind, data)
@@ -254,7 +255,7 @@ macro_rules! impl_endpoint {
             fn channel_request(
                 &mut self,
                 channel: $crate::ChannelId,
-                kind: &str,
+                kind: &[u8],
                 want_reply: bool,
                 data: Vec<u8>,
             ) -> (Option<$crate::RequestToken>, Vec<Action>) {
@@ -269,7 +270,7 @@ macro_rules! impl_endpoint {
             }
             fn global_request(
                 &mut self,
-                kind: &str,
+                kind: &[u8],
                 want_reply: bool,
                 data: Vec<u8>,
             ) -> (Option<$crate::RequestToken>, Vec<Action>) {

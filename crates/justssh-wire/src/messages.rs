@@ -1,6 +1,7 @@
 //! Transport-layer messages: RFC 4253 and the ECDH exchange of RFC 5656 §4.
 
 use crate::codec::{DecodeError, Reader, Writer};
+use crate::name::Name;
 use crate::number;
 
 /// `SSH_MSG_KEXINIT` (RFC 4253 §7.1).
@@ -453,7 +454,7 @@ impl Message {
             number::PING => Message::Ping(Ping::new(r.string()?.to_vec())),
             number::PONG => Message::Pong(Pong::new(r.string()?.to_vec())),
             number::GLOBAL_REQUEST => {
-                let kind = r.utf8()?.to_owned();
+                let kind = Name::from(r.string()?);
                 let want_reply = r.bool()?;
                 let data = r.remaining().to_vec();
                 return Ok(Message::GlobalRequest(GlobalRequest::new(
@@ -471,7 +472,7 @@ impl Message {
                 )));
             }
             number::CHANNEL_OPEN => {
-                let kind = r.utf8()?.to_owned();
+                let kind = Name::from(r.string()?);
                 let (sender, window, max_packet) = (r.u32()?, r.u32()?, r.u32()?);
                 let data = r.remaining().to_vec();
                 return Ok(Message::ChannelOpen(ChannelOpen::new(
@@ -510,7 +511,7 @@ impl Message {
             number::CHANNEL_CLOSE => Message::ChannelClose(ChannelClose::new(r.u32()?)),
             number::CHANNEL_REQUEST => {
                 let recipient = r.u32()?;
-                let kind = r.utf8()?.to_owned();
+                let kind = Name::from(r.string()?);
                 let want_reply = r.bool()?;
                 let data = r.remaining().to_vec();
                 return Ok(Message::ChannelRequest(ChannelRequest::new(
@@ -632,13 +633,13 @@ impl Ping {
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GlobalRequest {
-    pub kind: String,
+    pub kind: Name,
     pub want_reply: bool,
     pub data: Vec<u8>,
 }
 
 impl GlobalRequest {
-    pub fn new(kind: String, want_reply: bool, data: Vec<u8>) -> Self {
+    pub fn new(kind: Name, want_reply: bool, data: Vec<u8>) -> Self {
         GlobalRequest {
             kind,
             want_reply,
@@ -690,7 +691,7 @@ impl Pong {
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChannelOpen {
-    pub kind: String,
+    pub kind: Name,
     pub sender: u32,
     pub window: u32,
     pub max_packet: u32,
@@ -698,7 +699,7 @@ pub struct ChannelOpen {
 }
 
 impl ChannelOpen {
-    pub fn new(kind: String, sender: u32, window: u32, max_packet: u32, data: Vec<u8>) -> Self {
+    pub fn new(kind: Name, sender: u32, window: u32, max_packet: u32, data: Vec<u8>) -> Self {
         ChannelOpen {
             kind,
             sender,
@@ -837,13 +838,13 @@ impl ChannelClose {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChannelRequest {
     pub recipient: u32,
-    pub kind: String,
+    pub kind: Name,
     pub want_reply: bool,
     pub data: Vec<u8>,
 }
 
 impl ChannelRequest {
-    pub fn new(recipient: u32, kind: String, want_reply: bool, data: Vec<u8>) -> Self {
+    pub fn new(recipient: u32, kind: Name, want_reply: bool, data: Vec<u8>) -> Self {
         ChannelRequest {
             recipient,
             kind,

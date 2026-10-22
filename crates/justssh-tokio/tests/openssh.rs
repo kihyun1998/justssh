@@ -599,7 +599,7 @@ async fn record_requests(status: u32) -> (u16, JoinHandle<Vec<(String, Vec<u8>)>
                         .unwrap();
                 }
                 justssh::Action::ChannelRequest(r) => {
-                    seen.push((r.kind().to_owned(), r.data().to_vec()));
+                    seen.push((r.kind().to_str().unwrap().to_owned(), r.data().to_vec()));
                     if let Some(token) = r.reply() {
                         session.reply(token, true).await.unwrap();
                     }

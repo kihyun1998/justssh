@@ -8,7 +8,7 @@ fn bytes() -> impl Strategy<Value = Vec<u8>> {
 fn global_message() -> impl Strategy<Value = Message> {
     prop_oneof![
         ("[a-z0-9@.-]{1,32}", any::<bool>(), bytes())
-            .prop_map(|(k, w, d)| Message::GlobalRequest(GlobalRequest::new(k, w, d))),
+            .prop_map(|(k, w, d)| Message::GlobalRequest(GlobalRequest::new(k.into(), w, d))),
         bytes().prop_map(|d| Message::RequestSuccess(RequestSuccess::new(d))),
         bytes().prop_map(|d| Message::RequestFailure(RequestFailure::new(d))),
     ]

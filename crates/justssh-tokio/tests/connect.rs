@@ -463,7 +463,11 @@ async fn a_client_session_and_a_server_session_carry_an_exec_both_ways() {
         };
         session.accept_channel(channel, Vec::new()).await.unwrap();
         let (kind, data, token) = match session.next().await.unwrap() {
-            Some(Action::ChannelRequest(r)) => (r.kind().to_owned(), r.data().to_vec(), r.reply()),
+            Some(Action::ChannelRequest(r)) => (
+                r.kind().to_str().unwrap().to_owned(),
+                r.data().to_vec(),
+                r.reply(),
+            ),
             other => panic!("{other:?}"),
         };
         session.reply(token.unwrap(), true).await.unwrap();
@@ -517,7 +521,7 @@ async fn a_client_session_and_a_server_session_carry_an_exec_both_ways() {
             Action::ChannelData { data, .. } => {
                 seen.push(format!("data {}", String::from_utf8_lossy(&data)))
             }
-            Action::ChannelRequest(r) => seen.push(r.kind().to_owned()),
+            Action::ChannelRequest(r) => seen.push(r.kind().to_str().unwrap().to_owned()),
             Action::ChannelEof { .. } => seen.push("eof".into()),
             Action::ChannelClosed { .. } => {
                 seen.push("closed".into());

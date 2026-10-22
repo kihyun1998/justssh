@@ -210,10 +210,10 @@ where
     /// [`Action::ChannelOpened`] or [`Action::ChannelOpenFailed`].
     pub async fn open_channel(
         &mut self,
-        kind: &str,
+        kind: impl AsRef<[u8]>,
         data: Vec<u8>,
     ) -> io::Result<Option<ChannelId>> {
-        let (channel, actions) = self.endpoint.open_channel(kind, data);
+        let (channel, actions) = self.endpoint.open_channel(kind.as_ref(), data);
         self.send(actions).await?;
         Ok(channel)
     }
@@ -369,13 +369,13 @@ where
     pub async fn request(
         &mut self,
         channel: ChannelId,
-        kind: &str,
+        kind: impl AsRef<[u8]>,
         want_reply: bool,
         data: Vec<u8>,
     ) -> io::Result<Option<RequestToken>> {
-        let (token, actions) = self
-            .endpoint
-            .channel_request(channel, kind, want_reply, data);
+        let (token, actions) =
+            self.endpoint
+                .channel_request(channel, kind.as_ref(), want_reply, data);
         self.send(actions).await?;
         Ok(token)
     }
@@ -389,11 +389,13 @@ where
     /// from [`next`](Session::next) in [`Action::GlobalRequestReply`].
     pub async fn global_request(
         &mut self,
-        kind: &str,
+        kind: impl AsRef<[u8]>,
         want_reply: bool,
         data: Vec<u8>,
     ) -> io::Result<Option<RequestToken>> {
-        let (token, actions) = self.endpoint.global_request(kind, want_reply, data);
+        let (token, actions) = self
+            .endpoint
+            .global_request(kind.as_ref(), want_reply, data);
         self.send(actions).await?;
         Ok(token)
     }

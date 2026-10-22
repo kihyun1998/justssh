@@ -19,9 +19,11 @@ fn opened(actions: &[Action]) -> Option<(ChannelId, Vec<u8>)> {
 
 fn open_request(actions: &[Action]) -> Option<(ChannelId, String, Vec<u8>)> {
     actions.iter().find_map(|a| match a {
-        Action::ChannelOpenRequest(r) => {
-            Some((r.channel(), r.kind().to_owned(), r.data().to_vec()))
-        }
+        Action::ChannelOpenRequest(r) => Some((
+            r.channel(),
+            r.kind().to_str().unwrap().to_owned(),
+            r.data().to_vec(),
+        )),
         _ => None,
     })
 }
@@ -307,8 +309,8 @@ fn the_servers_keepalive_reaches_the_client_and_can_be_answered() {
         panic!("no global request at the client: {at_client:?}");
     };
     assert_eq!(
-        (request.kind(), request.want_reply()),
-        ("keepalive@openssh.com", true)
+        (request.kind().to_str(), request.want_reply()),
+        (Some("keepalive@openssh.com"), true)
     );
     let token = request.reply().unwrap();
     let back = to_server(
@@ -380,7 +382,10 @@ fn an_exec_round_trip_carries_output_and_exit_status_in_order() {
     let Some(Action::ChannelRequest(r)) = at_server.first() else {
         panic!("{at_server:?}");
     };
-    assert_eq!((r.kind(), r.data()), ("exec", cmd.as_slice()));
+    assert_eq!(
+        (r.kind().to_str(), r.data()),
+        (Some("exec"), cmd.as_slice())
+    );
 
     let mut out = server.reply_channel_request(r.reply().unwrap(), true);
     out.extend(server.channel_data(server_id, b"uid=0\n"));
@@ -687,7 +692,7 @@ fn server_requests(actions: &[Action]) -> Vec<(String, Option<justssh::ReplyToke
     actions
         .iter()
         .filter_map(|a| match a {
-            Action::ChannelRequest(r) => Some((r.kind().to_owned(), r.reply())),
+            Action::ChannelRequest(r) => Some((r.kind().to_str().unwrap().to_owned(), r.reply())),
             _ => None,
         })
         .collect()

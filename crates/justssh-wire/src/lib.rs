@@ -2,6 +2,7 @@
 
 pub mod codec;
 mod messages;
+mod name;
 pub mod number;
 
 pub use codec::{DecodeError, Reader, Writer};
@@ -13,3 +14,4 @@ pub use messages::{
     ServiceAccept, ServiceRequest, Unimplemented, UserauthBanner, UserauthFailure, UserauthRequest,
     UserauthSuccess,
 };
+pub use name::Name;
