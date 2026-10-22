@@ -150,10 +150,25 @@ fn keys_are_offered_in_the_order_added_and_a_second_key_of_one_format_replaces_t
 
 #[test]
 fn a_host_key_with_a_certificate_is_offered_as_its_plain_key() {
+    let mut ca = justssh_wire::Writer::new();
+    ca.string(b"ssh-ed25519").string(&[8; 32]);
+    let mut signature = justssh_wire::Writer::new();
+    signature.string(b"ssh-ed25519").string(&[1; 64]);
     let mut w = justssh_wire::Writer::new();
     w.string(b"ssh-ed25519-cert-v01@openssh.com")
         .string(&[0; 32])
-        .string(&ed25519().plain_public_blob()[4 + 11 + 4..]);
+        .string(&ed25519().plain_public_blob()[4 + 11 + 4..])
+        .bytes(&[0; 8])
+        .u32(2)
+        .string(b"host")
+        .string(b"")
+        .bytes(&[0; 8])
+        .bytes(&[0xff; 8])
+        .string(b"")
+        .string(b"")
+        .string(b"")
+        .string(&ca.into_bytes())
+        .string(&signature.into_bytes());
     let key = ed25519().with_certificate(w.into_bytes()).unwrap();
     let mut server = server_of(HostKey::new(key), vec![]);
     assert_eq!(offered(&mut server), ["ssh-ed25519"]);

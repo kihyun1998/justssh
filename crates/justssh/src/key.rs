@@ -153,6 +153,7 @@ impl PrivateKey {
         if certified != key_fields {
             return Err(KeyError::CertificateMismatch);
         }
+        certificate_rest(&mut r).ok_or(KeyError::MalformedCertificate)?;
         self.certificate = Some(blob);
         Ok(self)
     }
@@ -513,6 +514,162 @@ fn public_fields(blob: &[u8]) -> Vec<u8> {
     let mut r = Reader::new(blob);
     r.string().expect("a key blob starts with its type");
     r.remaining().to_vec()
+}
+
+/// The fields of a certificate after its key, read as x/crypto/ssh's `parseCert` reads them:
+/// serial, type, key id, principals, validity, critical options, extensions, reserved, the
+/// signature key and the signature, with nothing after. The signature is not verified.
+fn certificate_rest(r: &mut Reader<'_>) -> Option<()> {
+    r.bytes(8).ok()?;
+    r.u32().ok()?;
+    r.string().ok()?;
+    let mut principals = Reader::new(r.string().ok()?);
+    while !principals.remaining().is_empty() {
+        principals.string().ok()?;
+    }
+    r.bytes(16).ok()?;
+    options(r.string().ok()?)?;
+    options(r.string().ok()?)?;
+    r.string().ok()?;
+    signature_key(r.string().ok()?)?;
+    let mut signature = Reader::new(r.string().ok()?);
+    let format = signature.string().ok()?;
+    signature.string().ok()?;
+    let security_key = matches!(
+        format,
+        b"sk-ecdsa-sha2-nistp256@openssh.com"
+            | b"sk-ecdsa-sha2-nistp256-cert-v01@openssh.com"
+            | b"sk-ssh-ed25519@openssh.com"
+            | b"sk-ssh-ed25519-cert-v01@openssh.com"
+    );
+    if !security_key {
+        signature.finish().ok()?;
+    }
+    r.finish().ok()
+}
+
+/// Critical options or extensions: names in strictly increasing order, each with data that is
+/// empty or one string.
+fn options(data: &[u8]) -> Option<()> {
+    let mut r = Reader::new(data);
+    let mut last: Option<&[u8]> = None;
+    while !r.remaining().is_empty() {
+        let name = r.string().ok()?;
+        if last.is_some_and(|l| name <= l) {
+            return None;
+        }
+        last = Some(name);
+        let value = r.string().ok()?;
+        if !value.is_empty() {
+            let mut v = Reader::new(value);
+            v.string().ok()?;
+            v.finish().ok()?;
+        }
+    }
+    Some(())
+}
+
+/// A certificate's signature key, which must be a public key x/crypto/ssh reads and not itself
+/// a certificate, with nothing after it.
+fn signature_key(blob: &[u8]) -> Option<()> {
+    let mut r = Reader::new(blob);
+    match r.string().ok()? {
+        b"ssh-ed25519" => {
+            (r.string().ok()?.len() == 32).then_some(())?;
+        }
+        b"sk-ssh-ed25519@openssh.com" => {
+            (r.string().ok()?.len() == 32).then_some(())?;
+            r.string().ok()?;
+        }
+        b"ssh-rsa" => {
+            let e = Mpint::read(&mut r)?;
+            let n = Mpint::read(&mut r)?;
+            let exponent = &e.magnitude;
+            let small = exponent.len() <= 3 && !e.negative;
+            let value = exponent.iter().fold(0u32, |v, &b| v << 8 | u32::from(b));
+            if !small || value < 3 || value & 1 == 0 || n.bits() > 16384 {
+                return None;
+            }
+        }
+        b"ssh-dss" => {
+            let (p, q, g, y) = (
+                Mpint::read(&mut r)?,
+                Mpint::read(&mut r)?,
+                Mpint::read(&mut r)?,
+                Mpint::read(&mut r)?,
+            );
+            let in_group = |x: &Mpint| !x.negative && x.bits() > 0 && x.below(&p);
+            if p.negative || p.bits() != 1024 || q.bits() != 160 || !in_group(&g) || !in_group(&y) {
+                return None;
+            }
+        }
+        name @ (b"ecdsa-sha2-nistp256" | b"ecdsa-sha2-nistp384" | b"ecdsa-sha2-nistp521") => {
+            let curve = &name[b"ecdsa-sha2-".len()..];
+            (r.string().ok()? == curve).then_some(())?;
+            curve_point(curve, r.string().ok()?)?;
+        }
+        b"sk-ecdsa-sha2-nistp256@openssh.com" => {
+            (r.string().ok()? == b"nistp256").then_some(())?;
+            curve_point(b"nistp256", r.string().ok()?)?;
+            r.string().ok()?;
+        }
+        _ => return None,
+    }
+    r.finish().ok()
+}
+
+/// An uncompressed point on `curve`, as Go's `elliptic.Unmarshal` takes it.
+fn curve_point(curve: &[u8], point: &[u8]) -> Option<()> {
+    let ok = match curve {
+        b"nistp256" => point.len() == 65 && p256::PublicKey::from_sec1_bytes(point).is_ok(),
+        b"nistp384" => point.len() == 97 && p384::PublicKey::from_sec1_bytes(point).is_ok(),
+        b"nistp521" => point.len() == 133 && p521::PublicKey::from_sec1_bytes(point).is_ok(),
+        _ => false,
+    };
+    (ok && point[0] == 4).then_some(())
+}
+
+/// An `mpint` as x/crypto/ssh reads one: a sign from its top bit, and its magnitude, the two's
+/// complement taken back for a negative number.
+struct Mpint {
+    negative: bool,
+    magnitude: Vec<u8>,
+}
+
+impl Mpint {
+    fn read(r: &mut Reader<'_>) -> Option<Self> {
+        let bytes = r.string().ok()?;
+        let negative = bytes.first().is_some_and(|b| b & 0x80 != 0);
+        let mut magnitude = bytes.to_vec();
+        if negative {
+            magnitude.iter_mut().for_each(|b| *b = !*b);
+            for b in magnitude.iter_mut().rev() {
+                *b = b.wrapping_add(1);
+                if *b != 0 {
+                    break;
+                }
+            }
+        }
+        let start = magnitude
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(magnitude.len());
+        magnitude.drain(..start);
+        Some(Mpint {
+            negative,
+            magnitude,
+        })
+    }
+
+    fn bits(&self) -> usize {
+        let m = &self.magnitude;
+        m.len() * 8 - m.first().map_or(0, |b| b.leading_zeros() as usize)
+    }
+
+    fn below(&self, other: &Mpint) -> bool {
+        let (a, b) = (&self.magnitude, &other.magnitude);
+        (a.len(), a) < (b.len(), b)
+    }
 }
 
 /// An ECDSA signature's `mpint r || mpint s` (RFC 5656 §3.1.2).
