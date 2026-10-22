@@ -7,6 +7,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use justssh::requests::{self, Env, ExitStatus, PtyReq};
 use justssh::{
     Closed, DisconnectReason, EcdsaCurve, Error, HostKey, Phase, PrivateKey, Server, ServerConfig,
     ServerConfigBuilder, Zeroizing,
@@ -568,4 +569,119 @@ async fn openssh_answers_the_rekeys_the_server_starts_after_a_low_threshold() {
         "{exchanges} key exchanges:
 {log}"
     );
+}
+
+/// Accepts one connection, records each channel request as `(kind, data)` up to `exec`, and
+/// answers that with exit status `status` built by its codec.
+async fn record_requests(status: u32) -> (u16, JoinHandle<Vec<(String, Vec<u8>)>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut server = Server::new(config(|b| b));
+        let accepted = justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
+            let ok = r.password() == PASSWORD.as_bytes();
+            async move { ok.then_some(()) }
+        })
+        .await
+        .unwrap();
+        let Accepted::Authenticated { io, events, .. } = accepted else {
+            panic!("{accepted:?}");
+        };
+        let mut session = Session::new(io, server, events);
+        let mut seen = Vec::new();
+        while let Ok(Some(action)) = session.next().await {
+            match action {
+                justssh::Action::ChannelOpenRequest(r) => {
+                    session
+                        .accept_channel(r.channel(), Vec::new())
+                        .await
+                        .unwrap();
+                }
+                justssh::Action::ChannelRequest(r) => {
+                    seen.push((r.kind().to_owned(), r.data().to_vec()));
+                    if let Some(token) = r.reply() {
+                        session.reply(token, true).await.unwrap();
+                    }
+                    if r.kind() == requests::Exec::KIND {
+                        let channel = r.channel();
+                        let exit = ExitStatus::new(status);
+                        session
+                            .request(channel, ExitStatus::KIND, false, exit.encode())
+                            .await
+                            .unwrap();
+                        session.eof(channel).await.unwrap();
+                        session.close(channel).await.unwrap();
+                    }
+                }
+                justssh::Action::GlobalRequest(r) => {
+                    if let Some(token) = r.reply() {
+                        session
+                            .reply_global(token, false, Vec::new())
+                            .await
+                            .unwrap();
+                    }
+                }
+                justssh::Action::Closed(_) => break,
+                _ => {}
+            }
+        }
+        seen
+    });
+    (port, task)
+}
+
+#[tokio::test]
+async fn openssh_requests_read_through_their_codecs_and_encode_back_to_the_same_bytes() {
+    let (port, task) = record_requests(5).await;
+    let askpass = askpass(&format!("codec{port}"), PASSWORD);
+    let known_hosts = std::env::temp_dir().join(format!("justssh-known-hosts-codec-{port}"));
+    let ssh = std::env::var("JUSTSSH_SSH").unwrap_or_else(|_| "ssh".to_owned());
+    let output = timeout(
+        LIMIT,
+        Command::new(ssh)
+            .args(["-tt", "-F", "none", "-p", &port.to_string()])
+            .args(["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"])
+            .arg("-o")
+            .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
+            .args(["-o", "SetEnv=JUSTSSH_CODEC=on"])
+            .args(["-o", "PreferredAuthentications=password"])
+            .args(["-o", "NumberOfPasswordPrompts=1"])
+            .env("SSH_ASKPASS", &askpass)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", ":0")
+            .env("TERM", "xterm-codec")
+            .stdin(Stdio::null())
+            .args(["justssh@127.0.0.1", "echo", "codec"])
+            .output(),
+    )
+    .await
+    .expect("ssh did not finish")
+    .expect("could not run ssh");
+    let _ = std::fs::remove_file(&known_hosts);
+    let _ = std::fs::remove_file(&askpass);
+    let seen = timeout(LIMIT, task)
+        .await
+        .expect("server did not finish")
+        .unwrap();
+    let log = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(5), "{log}");
+    let kinds: Vec<&str> = seen.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [PtyReq::KIND, Env::KIND, requests::Exec::KIND],
+        "{log}"
+    );
+    let pty = PtyReq::decode(&seen[0].1).unwrap();
+    assert_eq!(pty.term(), b"xterm-codec");
+    assert_eq!(pty.encode(), seen[0].1);
+    let env = Env::decode(&seen[1].1).unwrap();
+    assert_eq!(
+        (env.name(), env.value()),
+        (&b"JUSTSSH_CODEC"[..], &b"on"[..])
+    );
+    assert_eq!(env.encode(), seen[1].1);
+    let exec = requests::Exec::decode(&seen[2].1).unwrap();
+    assert_eq!(exec.command(), b"echo codec");
+    assert_eq!(exec.encode(), seen[2].1);
 }

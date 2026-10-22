@@ -2,6 +2,7 @@
 //! in a `JUSTSSH_SSHD_*_ADDR` variable, with the account in `JUSTSSH_SSHD_USER` and
 //! `JUSTSSH_SSHD_SECRET`. Without them each test is skipped, unless `JUSTSSH_REQUIRE_SSHD` is set.
 
+use justssh::requests::{self, ExitStatus, PtyReq};
 use justssh::{Action, Client, ClientConfig, InfoRequest, Phase, Zeroizing};
 use justssh_tokio::{AuthMethod, ClientHandler, Connected, Deadlines, Session};
 use tokio::net::TcpStream;
@@ -198,6 +199,15 @@ struct Exec {
 
 /// Runs `command` on a new session channel.
 async fn exec(session: &mut Session<TcpStream, Client>, command: &str) -> Exec {
+    exec_with(session, command, None).await
+}
+
+/// Runs `command` on a new session channel, with a terminal from `pty` when given.
+async fn exec_with(
+    session: &mut Session<TcpStream, Client>,
+    command: &str,
+    pty: Option<PtyReq>,
+) -> Exec {
     let mut seen = Answered::default();
     let channel = session
         .open_channel("session", Vec::new())
@@ -208,12 +218,28 @@ async fn exec(session: &mut Session<TcpStream, Client>, command: &str) -> Exec {
         Action::ChannelOpened { channel: c, .. } if c == channel => {}
         other => panic!("not opened: {other:?}"),
     }
-    let mut data = (command.len() as u32).to_be_bytes().to_vec();
-    data.extend(command.as_bytes());
-    let token = session.request(channel, "exec", true, data).await.unwrap();
+    let pty_token = match pty {
+        Some(pty) => session
+            .request(channel, PtyReq::KIND, true, pty.encode())
+            .await
+            .unwrap(),
+        None => None,
+    };
+    let token = session
+        .request(
+            channel,
+            requests::Exec::KIND,
+            true,
+            requests::Exec::new(command.as_bytes().to_vec()).encode(),
+        )
+        .await
+        .unwrap();
     let (mut stdout, mut stderr, mut status, mut replied) = (Vec::new(), Vec::new(), None, false);
     loop {
         match next_answering(session, &mut seen).await {
+            Action::ChannelRequestReply { token: t, ok, .. } if Some(t) == pty_token => {
+                assert!(ok, "pty-req refused");
+            }
             Action::ChannelRequestReply { token: t, ok, .. } if Some(t) == token => {
                 assert!(ok, "exec refused");
                 replied = true;
@@ -226,8 +252,8 @@ async fn exec(session: &mut Session<TcpStream, Client>, command: &str) -> Exec {
                 session.consumed(channel, data.len() as u32).await.unwrap();
                 stderr.extend(data);
             }
-            Action::ChannelRequest(r) if r.kind() == "exit-status" => {
-                status = Some(u32::from_be_bytes(r.data().try_into().unwrap()));
+            Action::ChannelRequest(r) if r.kind() == ExitStatus::KIND => {
+                status = Some(ExitStatus::decode(r.data()).unwrap().status());
             }
             Action::ChannelClosed { channel: c } if c == channel => break,
             _ => {}
@@ -268,6 +294,31 @@ async fn exec_on_sshd_returns_stdout_stderr_and_exit_status() {
 #[tokio::test]
 async fn exec_on_openssh_8_7_returns_stdout_stderr_and_exit_status() {
     exec_on("JUSTSSH_SSHD_RHEL9_ADDR").await;
+}
+
+#[tokio::test]
+async fn sshd_gives_a_command_the_terminal_a_pty_request_built_from_modes_asks_for() {
+    let Some((addr, user, password)) = target("JUSTSSH_SSHD_PASSWORD_ADDR") else {
+        return;
+    };
+    let mut session = session_to(&addr, &user, &password).await;
+    // MobaXterm's modes as measured (#5): VERASE ^H, IXANY and IUTF8 on, 38400 baud.
+    let modes = [(3, 8), (39, 1), (42, 1), (128, 38400), (129, 38400)];
+    let pty = PtyReq::new(b"xterm-mono".to_vec(), 97, 31, 0, 0, &modes);
+    let run = exec_with(
+        &mut session,
+        "[ -t 0 ] && echo tty; echo $TERM; stty size; stty -a",
+        Some(pty),
+    )
+    .await;
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(out.starts_with("tty\r\nxterm-mono\r\n31 97\r\n"), "{out}");
+    let flags: Vec<&str> = out.split_whitespace().collect();
+    assert!(
+        out.contains("erase = ^H;") && flags.contains(&"ixany") && flags.contains(&"iutf8"),
+        "{out}"
+    );
+    assert_eq!(run.status, 0);
 }
 
 #[tokio::test]

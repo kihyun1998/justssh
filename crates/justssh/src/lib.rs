@@ -7,6 +7,7 @@ mod endpoint;
 mod event;
 mod handshake;
 mod key;
+pub mod requests;
 mod server;
 mod transport;
 
@@ -21,6 +22,7 @@ pub use event::{
     Action, Closed, DisconnectReason, Error, Event, InfoRequest, PasswordRequest, Phase, Prompt,
 };
 pub use handshake::{AlgorithmCategory, Algorithms, Handshake, KexInitRecord};
+pub use justssh_wire::DecodeError;
 pub use key::{EcdsaCurve, KeyError, PrivateKey};
 pub use rand_core;
 pub use server::Server;
