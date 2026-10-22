@@ -374,18 +374,23 @@ fn certificate(cert_type: &str, plain_blob: &[u8]) -> Vec<u8> {
     w.bytes(plain.remaining());
     // uint64 serial, uint32 type, string key id, string principals, uint64 valid after,
     // uint64 valid before, string critical options, string extensions, string reserved,
-    // string signature key, string signature: their content is the server's to check.
+    // string signature key (an ed25519 CA), string signature: well formed, and the CA's
+    // signature over them the server's to check.
     w.bytes(&[0; 8])
         .u32(1)
         .string(b"id")
         .string(b"")
         .bytes(&[0; 8])
         .bytes(&[0xff; 8]);
+    let mut ca = Writer::new();
+    ca.string(b"ssh-ed25519").string(&[8; 32]);
+    let mut signature = Writer::new();
+    signature.string(b"ssh-ed25519").string(&[1; 64]);
     w.string(b"")
         .string(b"")
         .string(b"")
-        .string(b"ca")
-        .string(b"sig");
+        .string(&ca.into_bytes())
+        .string(&signature.into_bytes());
     w.into_bytes()
 }
 

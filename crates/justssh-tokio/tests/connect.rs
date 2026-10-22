@@ -580,11 +580,15 @@ fn certificate(cert_type: &str, plain_blob: &[u8]) -> Vec<u8> {
         .string(b"")
         .bytes(&[0; 8])
         .bytes(&[0xff; 8]);
+    let mut ca = Writer::new();
+    ca.string(b"ssh-ed25519").string(&[8; 32]);
+    let mut signature = Writer::new();
+    signature.string(b"ssh-ed25519").string(&[1; 64]);
     w.string(b"")
         .string(b"")
         .string(b"")
-        .string(b"ca")
-        .string(b"sig");
+        .string(&ca.into_bytes())
+        .string(&signature.into_bytes());
     w.into_bytes()
 }
 

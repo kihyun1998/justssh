@@ -1,6 +1,8 @@
 //! Private key files for justssh: OpenSSH private keys read, with or without a passphrase, and
-//! written, each as a [`KeyFile`] that yields the core's [`PrivateKey`].
+//! written, each as a [`KeyFile`] that yields the core's [`PrivateKey`]; and certificates given
+//! as `authorized_keys` lines.
 
+mod authorized;
 mod openssh;
 
 use core::fmt;
@@ -91,6 +93,13 @@ impl KeyFile {
     pub fn to_openssh(&self) -> Zeroizing<String> {
         openssh::encode(self)
     }
+}
+
+/// The OpenSSH certificate on an `authorized_keys` line, such as the `-cert.pub` file
+/// `ssh-keygen -s` writes, for [`PrivateKey::with_certificate`]: the first line that holds a key,
+/// past blank and `#` lines and any options, whose declared type must match the certificate's.
+pub fn certificate_from_line(text: &[u8]) -> Result<Vec<u8>, KeyFileError> {
+    authorized::certificate(text)
 }
 
 impl fmt::Debug for KeyFile {
