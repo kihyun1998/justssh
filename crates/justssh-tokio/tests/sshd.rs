@@ -512,6 +512,21 @@ fn keys_dir() -> Option<String> {
         for (name, _) in KEY_FILES {
             lines.push_str(&std::fs::read_to_string(key_file(&format!("{name}.pub"))).unwrap());
         }
+        for (name, encrypted) in PPK_FILES {
+            let source = std::fs::read(ppk_file(&format!("{name}.openssh"))).unwrap();
+            let key = justssh_keys::KeyFile::from_openssh(
+                &source,
+                encrypted.then_some(&b"correct horse"[..]),
+            )
+            .unwrap();
+            let blob = key.private_key().plain_public_blob();
+            let key_type = justssh_wire::Reader::new(&blob).utf8().unwrap().to_owned();
+            lines.push_str(&format!(
+                "{key_type} {} {name}-ppk
+",
+                base64(&blob)
+            ));
+        }
         std::fs::write(format!("{dir}/authorized_keys"), lines).unwrap();
         let ca = format!("{dir}/ca");
         let _ = std::fs::remove_file(&ca);
@@ -615,6 +630,45 @@ fn key_file(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../justssh-keys/tests/keys")
         .join(name)
+}
+
+/// The PPK files WinSCP made for `justssh-keys`' tests from the OpenSSH key beside each, with
+/// whether they are encrypted (passphrase `correct horse`).
+const PPK_FILES: [(&str, bool); 8] = [
+    ("ed25519", false),
+    ("ed25519-enc", true),
+    ("ecdsa256", false),
+    ("ecdsa384", false),
+    ("ecdsa384-enc", true),
+    ("ecdsa521", false),
+    ("rsa", false),
+    ("rsa-enc", true),
+];
+
+fn ppk_file(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../justssh-keys/tests/ppk")
+        .join(name)
+}
+
+#[tokio::test]
+async fn logs_in_to_sshd_with_the_ppk_files_winscp_wrote() {
+    for (name, encrypted) in PPK_FILES {
+        let text = std::fs::read(ppk_file(&format!("{name}.ppk"))).unwrap();
+        let key =
+            justssh_keys::KeyFile::from_ppk(&text, encrypted.then_some(&b"correct horse"[..]))
+                .unwrap()
+                .private_key()
+                .clone();
+        let Some((connected, _)) = log_in_with_keys("JUSTSSH_SSHD_KEYS_ADDR", vec![key]).await
+        else {
+            return;
+        };
+        assert!(
+            matches!(connected, Connected::Authenticated { .. }),
+            "{name}: {connected:?}"
+        );
+    }
 }
 
 #[tokio::test]
