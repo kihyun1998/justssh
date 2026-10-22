@@ -49,7 +49,8 @@ pub async fn serve_connection(stream: TcpStream) -> std::io::Result<()> {
                     .then(|| command(request.data()))
                     .flatten();
                 if let Some(token) = request.reply() {
-                    let ok = exec.is_some() || matches!(request.kind(), "pty-req" | "env");
+                    let ok = exec.is_some()
+                        || matches!(request.kind().to_str(), Some("pty-req" | "env"));
                     session.reply(token, ok).await?;
                 }
                 if let Some(cmd) = exec {

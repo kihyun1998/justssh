@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use justssh_wire::{
     ChannelClose, ChannelData, ChannelEof, ChannelExtendedData, ChannelFailure, ChannelOpen,
     ChannelOpenConfirmation, ChannelOpenFailure, ChannelRequest as WireRequest, ChannelSuccess,
-    ChannelWindowAdjust, GlobalRequest as WireGlobalRequest, Message, RequestFailure,
+    ChannelWindowAdjust, GlobalRequest as WireGlobalRequest, Message, Name, RequestFailure,
     RequestSuccess,
 };
 
@@ -58,7 +58,7 @@ pub struct RequestToken {
 /// A global request from the peer. When it wants a reply, answer it through `reply`.
 #[derive(Debug, Clone)]
 pub struct GlobalRequest {
-    kind: String,
+    kind: Name,
     want_reply: bool,
     data: Vec<u8>,
     reply: Option<GlobalReplyToken>,
@@ -66,7 +66,7 @@ pub struct GlobalRequest {
 
 impl GlobalRequest {
     /// The request name, such as `tcpip-forward` or `keepalive@openssh.com`.
-    pub fn kind(&self) -> &str {
+    pub fn kind(&self) -> &Name {
         &self.kind
     }
 
@@ -110,7 +110,7 @@ impl OpenFailureReason {
 #[derive(Debug, Clone)]
 pub struct ChannelOpenRequest {
     channel: ChannelId,
-    kind: String,
+    kind: Name,
     data: Vec<u8>,
     peer_window: u32,
     peer_max_packet: u32,
@@ -122,7 +122,7 @@ impl ChannelOpenRequest {
     }
 
     /// The channel type, such as `session` or `direct-tcpip`.
-    pub fn kind(&self) -> &str {
+    pub fn kind(&self) -> &Name {
         &self.kind
     }
 
@@ -144,7 +144,7 @@ impl ChannelOpenRequest {
 #[derive(Debug, Clone)]
 pub struct ChannelRequest {
     channel: ChannelId,
-    kind: String,
+    kind: Name,
     want_reply: bool,
     data: Vec<u8>,
     reply: Option<ReplyToken>,
@@ -156,7 +156,7 @@ impl ChannelRequest {
     }
 
     /// The request type, such as `pty-req` or `exec`.
-    pub fn kind(&self) -> &str {
+    pub fn kind(&self) -> &Name {
         &self.kind
     }
 
@@ -178,14 +178,14 @@ impl ChannelRequest {
 /// What is known about an open channel.
 #[derive(Debug, Clone)]
 pub struct ChannelInfo {
-    kind: String,
+    kind: Name,
     peer_window: u32,
     peer_max_packet: u32,
     queued: usize,
 }
 
 impl ChannelInfo {
-    pub fn kind(&self) -> &str {
+    pub fn kind(&self) -> &Name {
         &self.kind
     }
 
@@ -221,14 +221,14 @@ enum Out {
     },
     Eof,
     /// A request, with the sequence number of its token when it wants a reply.
-    Request(String, Option<u64>, Vec<u8>),
+    Request(Name, Option<u64>, Vec<u8>),
     Close,
 }
 
 struct Channel {
     this: ChannelId,
     peer_id: u32,
-    kind: String,
+    kind: Name,
     /// Open in both directions: accepted by the consumer, or confirmed by the peer.
     accepted: bool,
     /// Opened by this side, awaiting the peer's confirmation.
@@ -303,7 +303,7 @@ impl Channels {
         &self,
         id: u32,
         peer_id: u32,
-        kind: String,
+        kind: Name,
         peer_window: u32,
         peer_max_packet: u32,
     ) -> Channel {
@@ -619,14 +619,14 @@ impl Channels {
     /// [`Action::ChannelOpenFailed`].
     pub(crate) fn open_channel(
         &mut self,
-        kind: &str,
+        kind: &[u8],
         data: Vec<u8>,
     ) -> (Option<ChannelId>, Vec<Step>) {
         let id = self.allocate();
-        let mut channel = self.channel(id, 0, kind.to_owned(), 0, 0);
+        let mut channel = self.channel(id, 0, Name::from(kind), 0, 0);
         channel.opening = true;
         self.open.insert(id, channel);
-        let open = ChannelOpen::new(kind.to_owned(), id, self.window, self.max_packet, data);
+        let open = ChannelOpen::new(Name::from(kind), id, self.window, self.max_packet, data);
         let this = ChannelId {
             connection: self.connection,
             id,
@@ -712,7 +712,7 @@ impl Channels {
     pub(crate) fn request(
         &mut self,
         id: ChannelId,
-        kind: &str,
+        kind: &[u8],
         want_reply: bool,
         data: Vec<u8>,
     ) -> (Option<RequestToken>, Vec<Step>) {
@@ -734,13 +734,13 @@ impl Channels {
             c.awaiting.push_back(seq);
             steps.push(Step::Send(Message::ChannelRequest(WireRequest::new(
                 c.peer_id,
-                kind.to_owned(),
+                Name::from(kind),
                 true,
                 data,
             ))));
         } else {
             c.queue.push_back(Out::Request(
-                kind.to_owned(),
+                Name::from(kind),
                 want_reply.then_some(seq),
                 data,
             ));
@@ -805,7 +805,7 @@ impl Channels {
     /// reply.
     pub(crate) fn global_request(
         &mut self,
-        kind: &str,
+        kind: &[u8],
         want_reply: bool,
         data: Vec<u8>,
     ) -> (Option<RequestToken>, Vec<Step>) {
@@ -817,7 +817,7 @@ impl Channels {
                 seq,
             }
         });
-        let request = WireGlobalRequest::new(kind.to_owned(), want_reply, data);
+        let request = WireGlobalRequest::new(Name::from(kind), want_reply, data);
         (token, vec![Step::Send(Message::GlobalRequest(request))])
     }
 

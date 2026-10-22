@@ -6,7 +6,7 @@ use common::*;
 use justssh::{Action, ChannelId, Client, Closed, Error, Event, Server};
 use justssh_wire::{
     ChannelClose, ChannelData, ChannelEof, ChannelExtendedData, ChannelOpen, ChannelRequest,
-    ChannelWindowAdjust, Message, UserauthRequest,
+    ChannelWindowAdjust, GlobalRequest, Message, UserauthRequest,
 };
 
 const WINDOW: u32 = 2 * 1024 * 1024;
@@ -44,9 +44,11 @@ fn requests(actions: &[Action]) -> Vec<(String, bool, Vec<u8>)> {
     actions
         .iter()
         .filter_map(|a| match a {
-            Action::ChannelRequest(r) => {
-                Some((r.kind().to_owned(), r.want_reply(), r.data().to_vec()))
-            }
+            Action::ChannelRequest(r) => Some((
+                r.kind().to_str().unwrap().to_owned(),
+                r.want_reply(),
+                r.data().to_vec(),
+            )),
             _ => None,
         })
         .collect()
@@ -300,7 +302,10 @@ fn data_eof_and_a_request_wait_behind_data_the_window_holds_back() {
         ] => {
             assert_eq!(d.data, b"abcdefghij");
             assert_eq!((e.code, e.data.as_slice()), (1, &b"err"[..]));
-            assert_eq!((r.kind.as_str(), r.want_reply), ("exit-status", false));
+            assert_eq!(
+                (r.kind.to_str(), r.want_reply),
+                (Some("exit-status"), false)
+            );
         }
         other => panic!("out of order: {other:?}"),
     }
@@ -474,8 +479,12 @@ fn the_peers_window_and_maximum_packet_can_be_read() {
     let id = open(&mut server, &mut client, 0, 777);
     let info = server.channel_info(id).unwrap();
     assert_eq!(
-        (info.kind(), info.peer_window(), info.peer_max_packet()),
-        ("session", 777, MAX_PACKET)
+        (
+            info.kind().to_str(),
+            info.peer_window(),
+            info.peer_max_packet()
+        ),
+        (Some("session"), 777, MAX_PACKET)
     );
 }
 
@@ -750,8 +759,8 @@ fn a_request_wanting_a_reply_overtakes_data_the_window_holds_back() {
         [Message::ChannelData(d), Message::ChannelRequest(r)] => {
             assert_eq!(d.data, b"0123456789");
             assert_eq!(
-                (r.kind.as_str(), r.want_reply),
-                ("keepalive@openssh.com", true)
+                (r.kind.to_str(), r.want_reply),
+                (Some("keepalive@openssh.com"), true)
             );
         }
         other => panic!("{other:?}"),
@@ -822,4 +831,82 @@ fn nothing_is_reported_drained_when_the_window_takes_everything_at_once() {
             .iter()
             .any(|a| matches!(a, Action::ChannelDrained { .. }))
     );
+}
+
+#[test]
+fn names_that_are_not_utf8_reach_the_consumer_and_go_out_again_as_received() {
+    const NAME: &[u8] = b"x\x80\xe9@y";
+    let (mut server, mut client) = connected();
+    let actions = send(
+        &mut server,
+        &mut client,
+        &[
+            Message::ChannelOpen(ChannelOpen::new(
+                NAME.into(),
+                4,
+                WINDOW,
+                MAX_PACKET,
+                Vec::new(),
+            )),
+            Message::GlobalRequest(GlobalRequest::new(NAME.into(), false, vec![1])),
+        ],
+    );
+    let Some(Action::ChannelOpenRequest(open)) = actions.first() else {
+        panic!("{actions:?}");
+    };
+    let Some(Action::GlobalRequest(global)) = actions.get(1) else {
+        panic!("{actions:?}");
+    };
+    assert_eq!(
+        (open.kind().as_bytes(), global.kind().as_bytes()),
+        (NAME, NAME)
+    );
+    let id = open.channel();
+    let confirmed = replies(&mut client, &server.accept_channel(id, Vec::new()));
+    let [Message::ChannelOpenConfirmation(c)] = &confirmed[..] else {
+        panic!("{confirmed:?}");
+    };
+    let actions = send(
+        &mut server,
+        &mut client,
+        &[Message::ChannelRequest(ChannelRequest::new(
+            c.sender,
+            NAME.into(),
+            false,
+            vec![2],
+        ))],
+    );
+    let Some(Action::ChannelRequest(request)) = actions.first() else {
+        panic!("{actions:?}");
+    };
+    assert_eq!(request.kind().as_bytes(), NAME);
+
+    let mut out = server
+        .channel_request(id, request.kind(), false, Vec::new())
+        .1;
+    out.extend(
+        server
+            .channel_request(id, request.kind(), true, Vec::new())
+            .1,
+    );
+    out.extend(server.global_request(global.kind(), false, Vec::new()).1);
+    out.extend(server.open_channel(open.kind(), Vec::new()).1);
+    let sent: Vec<Vec<u8>> = replies(&mut client, &out)
+        .into_iter()
+        .map(|m| match m {
+            Message::ChannelRequest(m) => m.kind.into_bytes(),
+            Message::GlobalRequest(m) => m.kind.into_bytes(),
+            Message::ChannelOpen(m) => m.kind.into_bytes(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(sent, [NAME; 4]);
+}
+
+#[test]
+fn either_role_is_usable_as_a_trait_object() {
+    let (server, _client) = connected();
+    let mut endpoint: Box<dyn justssh::Endpoint> = Box::new(server);
+    let (channel, _) = endpoint.open_channel(b"session", Vec::new());
+    assert!(channel.is_some());
 }

@@ -656,3 +656,79 @@ async fn a_go_server_answers_the_rekeys_the_client_starts() {
     assert_eq!(replies, 100);
     assert!(rekeys > 10, "{rekeys} rekeys");
 }
+
+#[tokio::test]
+async fn a_go_client_naming_requests_and_a_channel_type_in_bytes_that_are_not_utf8_gets_answers() {
+    let Some(go) = harness() else {
+        return;
+    };
+    const NAME: &[u8] = b"x\x80\xe9@y";
+    let hex: String = NAME.iter().map(|b| format!("{b:02x}")).collect();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let child = Command::new(&go)
+        .arg("client")
+        .args(["-addr", &addr, "-namehex", &hex])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let (stream, _) = timeout(LIMIT, listener.accept()).await.unwrap().unwrap();
+    let mut server = Server::new(ServerConfig::builder(ed25519()).build());
+    let accepted = timeout(
+        LIMIT,
+        justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
+            let ok = r.user() == b"alice" && r.password() == b"pw";
+            async move { ok.then_some(()) }
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Accepted::Authenticated { io, events, .. } = accepted else {
+        panic!("{accepted:?}");
+    };
+    let mut session = Session::new(io, server, events);
+    let mut names = Vec::new();
+    loop {
+        match timeout(LIMIT, session.next()).await.unwrap() {
+            Ok(Some(Action::GlobalRequest(r))) => {
+                names.push(r.kind().clone());
+                if let Some(token) = r.reply() {
+                    session.reply_global(token, true, Vec::new()).await.unwrap();
+                }
+            }
+            Ok(Some(Action::ChannelOpenRequest(r))) => {
+                names.push(r.kind().clone());
+                session
+                    .accept_channel(r.channel(), Vec::new())
+                    .await
+                    .unwrap();
+            }
+            Ok(Some(Action::ChannelRequest(r))) => {
+                names.push(r.kind().clone());
+                if let Some(token) = r.reply() {
+                    session.reply(token, true).await.unwrap();
+                }
+            }
+            Ok(Some(Action::ChannelClosed { .. }))
+            | Ok(Some(Action::Closed(_)) | None)
+            | Err(_) => {
+                break;
+            }
+            Ok(Some(_)) => {}
+        }
+    }
+    let out = timeout(LIMIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "Go client: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let names: Vec<&[u8]> = names.iter().map(|n| n.as_bytes()).collect();
+    assert_eq!(names, [NAME; 3]);
+}

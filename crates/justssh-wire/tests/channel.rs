@@ -15,8 +15,9 @@ fn name() -> impl Strategy<Value = String> {
 
 fn channel_message() -> impl Strategy<Value = Message> {
     prop_oneof![
-        (name(), any::<u32>(), any::<u32>(), any::<u32>(), bytes())
-            .prop_map(|(k, s, w, m, d)| { Message::ChannelOpen(ChannelOpen::new(k, s, w, m, d)) }),
+        (name(), any::<u32>(), any::<u32>(), any::<u32>(), bytes()).prop_map(|(k, s, w, m, d)| {
+            Message::ChannelOpen(ChannelOpen::new(k.into(), s, w, m, d))
+        }),
         (
             any::<u32>(),
             any::<u32>(),
@@ -38,8 +39,9 @@ fn channel_message() -> impl Strategy<Value = Message> {
         }),
         any::<u32>().prop_map(|r| Message::ChannelEof(ChannelEof::new(r))),
         any::<u32>().prop_map(|r| Message::ChannelClose(ChannelClose::new(r))),
-        (any::<u32>(), name(), any::<bool>(), bytes())
-            .prop_map(|(r, k, w, d)| { Message::ChannelRequest(ChannelRequest::new(r, k, w, d)) }),
+        (any::<u32>(), name(), any::<bool>(), bytes()).prop_map(|(r, k, w, d)| {
+            Message::ChannelRequest(ChannelRequest::new(r, k.into(), w, d))
+        }),
         any::<u32>().prop_map(|r| Message::ChannelSuccess(ChannelSuccess::new(r))),
         any::<u32>().prop_map(|r| Message::ChannelFailure(ChannelFailure::new(r))),
     ]
@@ -85,8 +87,8 @@ fn a_channel_request_keeps_its_type_specific_data_byte_for_byte() {
         panic!("not a channel request");
     };
     assert_eq!(
-        (r.recipient, r.kind.as_str(), r.want_reply),
-        (7, "pty-req", true)
+        (r.recipient, r.kind.to_str(), r.want_reply),
+        (7, Some("pty-req"), true)
     );
     assert_eq!(r.data, data);
     assert_eq!(Message::ChannelRequest(r).encode(), payload);

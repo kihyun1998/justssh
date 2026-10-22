@@ -1,0 +1,11 @@
+# Request names
+
+How the names of global requests, channel requests and channel types cross the connection protocol (`crates/justssh-wire/src/name.rs`, `messages.rs`), and what to watch when changing them.
+
+## Names are bytes
+
+A global request's name, a channel request's type and a channel type are read as bytes and handed over as a `Name`, so a name that is not UTF-8 reaches the consumer and goes out again unchanged, as any Opaque Request must (ADR-0001). x/crypto/ssh reads all three into Go `string`, which holds any bytes (`messages.go` `globalRequestMsg.Type`, `channelRequestMsg.Request`, `channelOpenMsg.ChanType`); reading them as UTF-8 ended the connection with a decode error instead (#27). No peer sending such a name was found; `a_go_client_naming_requests_and_a_channel_type_in_bytes_that_are_not_utf8_gets_answers` has a Go client send one through all three and get each answered. The core never reads a name, so nothing else depends on its contents.
+
+`Name` compares equal, either way round, to a `str`, `String` or byte string holding the same bytes, so `request.kind() == "exec"` reads as it did when names were strings. A `Name` cannot be matched on: dispatch as Go's `switch req.Type` does with `match name.to_str() { Some("shell" | "exec") => … }`, where a name that is not UTF-8 falls to the `None` arm. A `HashMap` or `HashSet` keyed by `Name` is looked up by `&[u8]`. It shows as `escape_ascii` does, with bytes outside printable ASCII and `'`, `"` and `\` escaped (`x\x80`), never replaced, so a log line tells two names apart and holds no control bytes; width and precision apply to that escaped text. `to_str`, not `to_string`, gives the text to compare. Sending takes anything that is bytes: a `str`, a byte string, or a `Name` received from the other side. The `Endpoint` trait takes `&[u8]`, so it stays usable as `dyn Endpoint`. The maintainer chose this type on #27 over plain `&[u8]`, which would have had every comparison written as a byte string.
+
+Other names read as UTF-8 stay so and end the connection when they are not: the service name, the authentication method, algorithm names and the extension names of `EXT_INFO`. They are matched against fixed values rather than passed through.

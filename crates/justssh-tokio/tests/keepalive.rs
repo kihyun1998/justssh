@@ -49,7 +49,7 @@ async fn serve(listener: TcpListener) -> std::io::Result<Vec<(String, bool, Vec<
             }
             Action::GlobalRequest(request) => {
                 globals.push((
-                    request.kind().to_owned(),
+                    request.kind().to_str().unwrap().to_owned(),
                     request.want_reply(),
                     request.data().to_vec(),
                 ));
