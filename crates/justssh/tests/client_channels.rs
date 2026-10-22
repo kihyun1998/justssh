@@ -681,3 +681,48 @@ fn a_channel_id_from_another_connection_does_nothing() {
     assert!(client_a.channel_info(b_id).is_none());
     assert!(!client_a.channel_data(a_id, b"own").is_empty());
 }
+
+/// The server-side reply tokens of the channel requests in `actions`, by kind.
+fn server_requests(actions: &[Action]) -> Vec<(String, Option<justssh::ReplyToken>)> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::ChannelRequest(r) => Some((r.kind().to_owned(), r.reply())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_request_wanting_a_reply_queued_while_opening_goes_ahead_of_data_once_confirmed() {
+    let (mut server, mut client) = authenticated_pair();
+    let (id, opening) = client.open_channel("session", Vec::new());
+    let id = id.unwrap();
+    let at_server = to_server(&mut server, opening);
+    let (server_id, _, _) = open_request(&at_server).expect("no open request");
+    let window = 2 * 1024 * 1024;
+    let mut queued = client.channel_data(id, &vec![b'x'; window + 1000]);
+    let (early, more) = client.channel_request(id, "early@example.com", true, Vec::new());
+    queued.extend(more);
+    assert!(queued.is_empty(), "{queued:?}");
+
+    let back = to_client(&mut client, server.accept_channel(server_id, Vec::new()));
+    let first = server_requests(&to_server(&mut server, back));
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(first[0].0, "early@example.com");
+    assert!(client.channel_info(id).unwrap().queued() > 0);
+
+    let (late, sent) = client.channel_request(id, "late@example.com", true, Vec::new());
+    let second = server_requests(&to_server(&mut server, sent));
+    assert_eq!(second.len(), 1);
+    let mut answers = server.reply_channel_request(first[0].1.unwrap(), true);
+    answers.extend(server.reply_channel_request(second[0].1.unwrap(), false));
+    let replies: Vec<_> = to_client(&mut client, answers)
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::ChannelRequestReply { token, ok, .. } => Some((token, ok)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies, [(early.unwrap(), true), (late.unwrap(), false)]);
+}

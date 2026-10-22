@@ -731,3 +731,95 @@ fn a_repeated_eof_is_reported_once() {
         .count();
     assert_eq!(eofs, 1);
 }
+
+#[test]
+fn a_request_wanting_a_reply_overtakes_data_the_window_holds_back() {
+    let (mut server, mut client) = connected();
+    let id = open(&mut server, &mut client, 1, 10);
+    let mut actions = server.channel_data(id, b"0123456789abcdefghij");
+    actions.extend(
+        server
+            .channel_request(id, "exit-status", false, 0u32.to_be_bytes().to_vec())
+            .1,
+    );
+    let (token, more) = server.channel_request(id, "keepalive@openssh.com", true, Vec::new());
+    actions.extend(more);
+    assert!(token.is_some());
+    let sent = replies(&mut client, &actions);
+    match &sent[..] {
+        [Message::ChannelData(d), Message::ChannelRequest(r)] => {
+            assert_eq!(d.data, b"0123456789");
+            assert_eq!(
+                (r.kind.as_str(), r.want_reply),
+                ("keepalive@openssh.com", true)
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(server.channel_info(id).unwrap().queued(), 10);
+}
+
+#[test]
+fn a_drained_channel_is_reported_once_the_window_takes_what_was_queued() {
+    let (mut server, mut client) = connected();
+    let id = open(&mut server, &mut client, 1, 10);
+    let actions = server.channel_data(id, b"0123456789abcdefghij");
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::ChannelDrained { .. }))
+    );
+    let actions = send(
+        &mut server,
+        &mut client,
+        &[Message::ChannelWindowAdjust(ChannelWindowAdjust::new(
+            id.get(),
+            5,
+        ))],
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::ChannelDrained { .. }))
+    );
+    let actions = send(
+        &mut server,
+        &mut client,
+        &[Message::ChannelWindowAdjust(ChannelWindowAdjust::new(
+            id.get(),
+            100,
+        ))],
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::ChannelDrained { channel } if *channel == id)),
+        "{actions:?}"
+    );
+    assert_eq!(server.channel_info(id).unwrap().queued(), 0);
+}
+
+#[test]
+fn nothing_is_reported_drained_when_the_window_takes_everything_at_once() {
+    let (mut server, mut client) = connected();
+    let id = open(&mut server, &mut client, 1, WINDOW);
+    let actions = server.channel_data(id, b"all of it");
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::ChannelDrained { .. }))
+    );
+    let actions = send(
+        &mut server,
+        &mut client,
+        &[Message::ChannelWindowAdjust(ChannelWindowAdjust::new(
+            id.get(),
+            100,
+        ))],
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::ChannelDrained { .. }))
+    );
+}

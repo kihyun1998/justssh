@@ -254,6 +254,25 @@ where
         self.send(actions).await
     }
 
+    /// Queues `data` and sends what the peer's window allows, without waiting for the rest;
+    /// [`Action::ChannelDrained`] from [`next`](Session::next) reports when what waited has gone.
+    /// `ChannelInfo::queued` tells how much waits, which is the consumer's to bound.
+    pub async fn queue_data(&mut self, channel: ChannelId, data: &[u8]) -> io::Result<()> {
+        let actions = self.endpoint.channel_data(channel, data);
+        self.send(actions).await
+    }
+
+    /// [`queue_data`](Session::queue_data) for extended data of type `code`.
+    pub async fn queue_extended_data(
+        &mut self,
+        channel: ChannelId,
+        code: u32,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let actions = self.endpoint.channel_extended_data(channel, code, data);
+        self.send(actions).await
+    }
+
     /// Sends `data` and returns once the peer's window has taken all of it, reading meanwhile;
     /// what the peer does in the meantime is kept for [`next`](Session::next).
     pub async fn data(&mut self, channel: ChannelId, data: &[u8]) -> io::Result<()> {
