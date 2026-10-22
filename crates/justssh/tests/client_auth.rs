@@ -495,3 +495,28 @@ fn a_second_ext_info_before_the_service_is_accepted_ends_the_connection() {
     );
     assert_ne!(client.server_sig_algs(), Some(vec!["ssh-rsa"]));
 }
+
+#[test]
+fn a_message_60_after_authentication_ends_the_connection() {
+    let (mut server, mut client) = at_auth();
+    let none = client.auth_none();
+    to_client(&mut client, to_server(&mut server, none));
+    to_server(&mut server, client.auth_password(secret(b"hunter2")));
+    to_client(&mut client, server.process(Event::AuthAccepted));
+    assert_eq!(client.phase(), Phase::Connected);
+    server.set_raw_receive(true);
+    let actions = raw_to_client(
+        &mut server,
+        &mut client,
+        &[info_request(b"", b"", &[(b"a", false)])],
+    );
+    assert_eq!(
+        local_error(&actions),
+        Some((
+            DisconnectReason::PROTOCOL_ERROR,
+            Error::UnexpectedMessage {
+                number: number::USERAUTH_INFO_REQUEST
+            }
+        ))
+    );
+}
