@@ -16,9 +16,13 @@ Two things Go reads are refused here. The file's public halves must match its pr
 
 Generating a host key and publishing it exclusively, as acwbroker's `FileStore.generate` does, is the consumer's: the maintainer chose on #21 to keep the library to reading and writing. Writing an encrypted file is not done.
 
+## Certificates come as an authorized_keys line
+
+`certificate_from_line` reads a certificate as acwbroker does, with x/crypto/ssh's `ParseAuthorizedKey` (`internal/infrastructure/upstream/ssh_dialer.go`): the first line holding a key, past blank and `#` lines, its type taken first as the line's first field and otherwise after an options field, which runs to the first space or tab outside double quotes; the declared type must be the blob's, and the blob must be a certificate, which acwbroker requires next. White space is trimmed as Go's `bytes.TrimSpace` trims it, Unicode spaces included, and the base64 is decoded as Go's `StdEncoding` decodes it, taking unused bits in the last character. A line that does not parse is passed over for the next, as Go passes it over. Two cases differ from Go, both needing more than one line, where acwbroker passes one: the certificate's fields are checked when the key is put under it (`PrivateKey::with_certificate`, `user-authentication.md`), so a broken certificate on an earlier line fails there rather than giving way to a later one; and a plain key's line ends the search with `UnsupportedKeyType` without its key being checked, where Go would pass over a plain key that does not parse. `go_reads_each_certificate_line_as_justssh_keys_does` gives Go and this crate the same 16 lines and compares what each reads, including a certificate line commented out, which both refuse (#47).
+
 ## What is not read yet
 
-PEM keys (PKCS#1, PKCS#8, SEC1, legacy encrypted PEM), PuTTY's PPK and certificates given as an `authorized_keys` line, all of which acwbroker reads (`internal/infrastructure/upstream/ssh_dialer.go` `parseKey`, `internal/infrastructure/ppk`), were split from #21 by the maintainer.
+PEM keys (PKCS#1, PKCS#8, SEC1, legacy encrypted PEM) and PuTTY's PPK, which acwbroker reads (`parseKey`, `internal/infrastructure/ppk`), were split from #21 by the maintainer (#45, #46).
 
 ## What the proofs cover
 

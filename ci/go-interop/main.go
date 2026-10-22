@@ -4,6 +4,8 @@
 //	go-interop client -addr A -kex K -cipher C -mac M -hostkeyalgs A -rekey N -requests R -namehex H -printhostkey   connects once
 //	go-interop hostkey -type ed25519|rsa -out F   writes a host key as acwbroker does, prints its public key
 //	go-interop readkey -in F -passphrase P   reads a private key file, prints its public key
+//	go-interop readcert -hex H   parses a certificate blob as ParsePublicKey does
+//	go-interop readline -in F   reads an authorized_keys certificate line as acwbroker does, prints the blob in hex
 //
 // Empty -kex, -cipher, -mac and -hostkeyalgs leave x/crypto/ssh's defaults; -rekey sets
 // RekeyThreshold. With -requests the client sends R global requests of 1 KiB wanting a reply
@@ -63,6 +65,7 @@ func main() {
 	out := fs.String("out", "", "the file to write (hostkey)")
 	in := fs.String("in", "", "the key file to read (readkey)")
 	passphrase := fs.String("passphrase", "", "the passphrase of the key file (readkey)")
+	certHex := fs.String("hex", "", "the certificate blob to parse, in hex (readcert)")
 	nameHex := fs.String("namehex", "", "hex name of a global request, channel type and channel request the client sends, each wanting success (client)")
 	_ = fs.Parse(os.Args[2:])
 	algorithms := ssh.Config{
@@ -85,6 +88,10 @@ func main() {
 		err = writeHostKey(*keyType, *out)
 	case "readkey":
 		err = readKey(*in, *passphrase)
+	case "readcert":
+		err = readCert(*certHex)
+	case "readline":
+		err = readLine(*in)
 	default:
 		err = fmt.Errorf("unknown mode %q", os.Args[1])
 	}
@@ -284,5 +291,40 @@ func readKey(in, passphrase string) error {
 		return err
 	}
 	fmt.Print(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	return nil
+}
+
+// readCert parses the certificate blob hexBlob as ssh.ParsePublicKey does.
+func readCert(hexBlob string) error {
+	blob, err := hex.DecodeString(hexBlob)
+	if err != nil {
+		return err
+	}
+	pub, err := ssh.ParsePublicKey(blob)
+	if err != nil {
+		return err
+	}
+	if _, ok := pub.(*ssh.Certificate); !ok {
+		return fmt.Errorf("%T is a public key, not a certificate", pub)
+	}
+	return nil
+}
+
+// readLine reads the certificate line in the file in as acwbroker's upstream dialer does and
+// prints the certificate blob in hex.
+func readLine(in string) error {
+	b, err := os.ReadFile(in)
+	if err != nil {
+		return err
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(b)
+	if err != nil {
+		return err
+	}
+	cert, ok := pub.(*ssh.Certificate)
+	if !ok {
+		return fmt.Errorf("%T is a public key, not a certificate", pub)
+	}
+	fmt.Println(hex.EncodeToString(cert.Marshal()))
 	return nil
 }

@@ -887,3 +887,69 @@ async fn justssh_keys_reads_what_ssh_keygen_and_go_read_alike() {
         );
     }
 }
+
+#[path = "../../justssh/tests/common/certs.rs"]
+mod certs;
+
+#[tokio::test]
+async fn go_takes_or_refuses_each_certificate_as_the_core_does() {
+    let Some(go) = harness() else {
+        return;
+    };
+    let mut differ = Vec::new();
+    for (name, blob, valid) in certs::variants() {
+        let hex: String = blob.iter().map(|b| format!("{b:02x}")).collect();
+        let out = std::process::Command::new(&go)
+            .args(["readcert", "-hex", &hex])
+            .output()
+            .unwrap();
+        if out.status.success() != valid {
+            differ.push(format!(
+                "Go: {name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        if certs::certified_key().with_certificate(blob).is_ok() != valid {
+            differ.push(format!("core: {name}"));
+        }
+    }
+    assert!(differ.is_empty(), "{differ:#?}");
+}
+
+#[path = "../../justssh-keys/tests/common/lines.rs"]
+mod lines;
+
+#[tokio::test]
+async fn go_reads_each_certificate_line_as_justssh_keys_does() {
+    let Some(go) = harness() else {
+        return;
+    };
+    let cert = certs::Cert::valid().encode();
+    let plain = certs::certified_key().plain_public_blob();
+    let mut differ = Vec::new();
+    for (name, line, _) in lines::lines(&cert, &plain) {
+        let path = std::env::temp_dir().join(format!("justssh-cert-line-{}", std::process::id()));
+        std::fs::write(&path, &line).unwrap();
+        let out = std::process::Command::new(&go)
+            .args(["readline", "-in", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+        let go_read = out.status.success().then(|| {
+            let hex = String::from_utf8(out.stdout).unwrap();
+            (0..hex.trim().len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex.trim()[i..i + 2], 16).unwrap())
+                .collect::<Vec<u8>>()
+        });
+        let read = justssh_keys::certificate_from_line(line.as_bytes()).ok();
+        if go_read != read {
+            differ.push(format!(
+                "{name}: Go {:?}, justssh-keys {:?}",
+                go_read.is_some(),
+                read.is_some()
+            ));
+        }
+    }
+    assert!(differ.is_empty(), "{differ:#?}");
+}

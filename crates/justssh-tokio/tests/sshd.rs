@@ -445,22 +445,6 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
-fn unbase64(text: &str) -> Vec<u8> {
-    let mut bits = 0u32;
-    let mut count = 0;
-    let mut out = Vec::new();
-    for c in text.bytes().filter(|&c| c != b'=') {
-        let v = BASE64.iter().position(|&x| x == c).expect("base64") as u32;
-        bits = bits << 6 | v;
-        count += 6;
-        if count >= 8 {
-            count -= 8;
-            out.push((bits >> count) as u8);
-        }
-    }
-    out
-}
-
 /// The keys the public key sshd authorises, by name.
 fn authorised_keys() -> Vec<(&'static str, justssh::PrivateKey)> {
     use justssh::{EcdsaCurve, PrivateKey};
@@ -566,7 +550,7 @@ fn certificate(dir: &str, name: &str, key: &justssh::PrivateKey) -> Vec<u8> {
         &user,
     ]);
     let text = std::fs::read_to_string(format!("{dir}/user-{name}-cert.pub")).unwrap();
-    unbase64(text.split_whitespace().nth(1).unwrap())
+    justssh_keys::certificate_from_line(text.as_bytes()).unwrap()
 }
 
 /// Connects to the sshd in `var` with `keys` and nothing else; how it ended and the client.
