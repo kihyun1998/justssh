@@ -28,6 +28,13 @@ use version::{Line, VersionError};
 
 const USERAUTH: &str = "ssh-userauth";
 
+/// Packets received or sent under one key before keys are exchanged again, as x/crypto/ssh's
+/// `packetRekeyThreshold`.
+const REKEY_PACKETS: u64 = 1 << 31;
+
+/// Most payloads held while a key exchange is under way.
+const MAX_HELD: usize = 1024;
+
 /// Most input held unprocessed while a verdict is pending: one largest packet with its length
 /// field and MAC.
 const PENDING_INPUT: usize = packet::MAX_PACKET + 4 + packet::MAX_MAC;
@@ -132,6 +139,20 @@ pub(crate) struct Transport {
     sealing: Cipher,
     packets_received: u64,
     first_kex_done: bool,
+    /// Whether strict key exchange was agreed on the first key exchange; it holds for the rest of
+    /// the connection.
+    strict_kex: bool,
+    /// Whether this side's `SSH_MSG_KEXINIT` for the exchange under way has been sent.
+    kexinit_sent: bool,
+    /// The stage to return to once the exchange under way ends.
+    after_kex: Stage,
+    /// Payloads sent while an exchange is under way, sent in order once it ends.
+    held: Vec<Vec<u8>>,
+    /// Payload bytes received and sent under the keys now in use.
+    in_bytes: u64,
+    out_bytes: u64,
+    /// The bytes after which keys are exchanged again, in place of the cipher's default.
+    rekey_threshold: Option<u64>,
     skip_next: bool,
     exchange: Option<Exchange>,
     session_id: Option<Vec<u8>>,
@@ -189,6 +210,13 @@ impl Transport {
             sealing: Cipher::Plain,
             packets_received: 0,
             first_kex_done: false,
+            strict_kex: false,
+            kexinit_sent: false,
+            after_kex: Stage::Service,
+            held: Vec::new(),
+            in_bytes: 0,
+            out_bytes: 0,
+            rekey_threshold: None,
             skip_next: false,
             exchange: None,
             session_id: None,
@@ -209,7 +237,7 @@ impl Transport {
     /// Sends `payload` as one packet, whatever it holds.
     #[cfg(feature = "test-support")]
     pub(crate) fn send_raw(&mut self, payload: &[u8]) -> Vec<Action> {
-        self.send_payload(payload);
+        self.seal_and_write(payload);
         std::mem::take(&mut self.actions)
     }
 
@@ -218,6 +246,10 @@ impl Transport {
     #[cfg(feature = "test-support")]
     pub(crate) fn set_raw_receive(&mut self, raw: bool) {
         self.raw_receive = raw;
+    }
+
+    pub(crate) fn set_rekey_threshold(&mut self, bytes: Option<u64>) {
+        self.rekey_threshold = bytes;
     }
 
     pub(crate) fn set_send_ext_info(&mut self, send: bool) {
@@ -365,7 +397,7 @@ impl Transport {
         if self.phase == Phase::Closed {
             return Vec::new();
         }
-        let stage = self.stage;
+        let stage = self.settled_stage();
         let Some(auth) = self
             .client_auth
             .as_mut()
@@ -395,7 +427,7 @@ impl Transport {
             None => Some(key.algorithm_for(self.server_sig_algs().as_deref())),
             Some(a) => key.algorithms().iter().find(|k| **k == a).copied(),
         };
-        let stage = self.stage;
+        let stage = self.settled_stage();
         let (Some(algorithm), Some(auth)) = (
             algorithm,
             self.client_auth
@@ -467,7 +499,23 @@ impl Transport {
         self.send_payload(&message.encode());
     }
 
+    /// Sends `payload`, or holds it until the exchange under way ends when RFC 4253 §7.1 does
+    /// not allow it during one: anything but messages 1 to 4, `SSH_MSG_EXT_INFO` and 20 to 49.
     fn send_payload(&mut self, payload: &[u8]) {
+        if self.kexinit_sent && !matches!(payload[0], 1..=4 | 7 | 20..=49) {
+            if self.held.len() >= MAX_HELD {
+                return self.fail(DisconnectReason::PROTOCOL_ERROR, Error::ExchangeBacklog);
+            }
+            self.held.push(payload.to_vec());
+            return;
+        }
+        self.seal_and_write(payload);
+        if self.out_bytes > self.rekey_bytes(false) || self.out_since_keys >= REKEY_PACKETS {
+            self.start_rekey();
+        }
+    }
+
+    fn seal_and_write(&mut self, payload: &[u8]) {
         if self.out_since_keys > u64::from(u32::MAX) {
             if self.phase != Phase::Closed {
                 self.close(Closed::Local {
@@ -481,6 +529,7 @@ impl Transport {
         let packet = self.sealing.seal(payload, self.out_seq, &mut *self.rng);
         self.out_seq = self.out_seq.wrapping_add(1);
         self.out_since_keys += 1;
+        self.out_bytes += payload.len() as u64;
         self.write(packet);
     }
 
@@ -555,20 +604,72 @@ impl Transport {
             self.in_seq = seq.wrapping_add(1);
             let first = self.packets_received == 0;
             self.packets_received += 1;
+            self.in_bytes += opened.payload.len() as u64;
             self.dispatch(&opened.payload, seq, first);
+            if self.in_bytes > self.rekey_bytes(true) || self.in_since_keys >= REKEY_PACKETS {
+                self.start_rekey();
+            }
         }
     }
 
     fn on_version(&mut self, peer: String) {
         self.handshake.peer_version = Some(peer);
         self.version_done = true;
+        self.send_kexinit();
+    }
+
+    fn send_kexinit(&mut self) {
         let kexinit = self.local_kexinit();
         let raw = Message::KexInit(kexinit.clone()).encode();
+        self.kexinit_sent = true;
+        self.channels.pause();
         self.send_payload(&raw);
         self.handshake.local_kexinit = Some(KexInitRecord {
             raw,
             message: kexinit,
         });
+    }
+
+    /// Starts a key exchange once connected, unless one is under way.
+    fn start_rekey(&mut self) {
+        if self.first_kex_done && !self.kexinit_sent && self.phase != Phase::Closed {
+            self.send_kexinit();
+        }
+    }
+
+    /// Asks for a key exchange; nothing happens before the first one ends or while one is
+    /// under way.
+    pub(crate) fn rekey(&mut self) -> Vec<Action> {
+        self.start_rekey();
+        std::mem::take(&mut self.actions)
+    }
+
+    /// The stage outside any exchange under way.
+    fn settled_stage(&self) -> Stage {
+        match self.stage {
+            Stage::KexEcdh | Stage::NewKeys if self.first_kex_done => self.after_kex,
+            s => s,
+        }
+    }
+
+    /// The bytes received (`incoming`) or sent under one key before keys are exchanged again: the
+    /// configured threshold, or x/crypto/ssh's `rekeyBytes` for the cipher.
+    fn rekey_bytes(&self, incoming: bool) -> u64 {
+        if let Some(t) = self.rekey_threshold {
+            return t;
+        }
+        let Some(algs) = self.handshake.negotiated.as_ref() else {
+            return 1 << 30;
+        };
+        let cipher = match (self.role, incoming) {
+            (Role::Server, true) | (Role::Client, false) => &algs.cipher_client_to_server,
+            _ => &algs.cipher_server_to_client,
+        };
+        if cipher.starts_with("aes") {
+            16 << 32
+        } else {
+            1 << 30
+        }
     }
 
     fn local_kexinit(&mut self) -> KexInit {
@@ -579,7 +680,7 @@ impl Transport {
         if self.role == Role::Client && self.session_id.is_none() {
             k.kex_algorithms.push(negotiate::EXT_INFO_CLIENT.to_owned());
         }
-        if preference.strict_kex {
+        if preference.strict_kex && self.session_id.is_none() {
             k.kex_algorithms.push(
                 match self.role {
                     Role::Server => negotiate::STRICT_SERVER,
@@ -610,10 +711,7 @@ impl Transport {
     }
 
     fn strict(&self) -> bool {
-        self.handshake
-            .negotiated
-            .as_ref()
-            .is_some_and(|a| a.strict_kex)
+        self.strict_kex
     }
 
     fn dispatch(&mut self, payload: &[u8], seq: u32, first: bool) {
@@ -700,6 +798,12 @@ impl Transport {
     }
 
     fn on_kexinit(&mut self, raw: Vec<u8>, peer: KexInit, first: bool) {
+        if self.first_kex_done {
+            self.after_kex = self.stage;
+        }
+        if !self.kexinit_sent {
+            self.send_kexinit();
+        }
         self.handshake.peer_kexinit = Some(KexInitRecord {
             raw,
             message: peer.clone(),
@@ -729,9 +833,14 @@ impl Transport {
                 );
             }
         };
-        let strict = algs.strict_kex;
+        let initial = self.session_id.is_none();
+        if initial {
+            self.strict_kex = algs.strict_kex;
+        }
+        let mut algs = algs;
+        algs.strict_kex = self.strict_kex;
         self.handshake.negotiated = Some(algs);
-        if strict && !first {
+        if initial && self.strict_kex && !first {
             return self.fail(DisconnectReason::PROTOCOL_ERROR, Error::StrictKexViolation);
         }
         self.skip_next = peer.first_kex_packet_follows && !guessed_right;
@@ -910,6 +1019,7 @@ impl Transport {
         self.send(&Message::NewKeys(NewKeys::default()));
         self.sealing = outgoing;
         self.out_since_keys = 0;
+        self.out_bytes = 0;
         if self.strict() {
             self.out_seq = 0;
         }
@@ -1118,14 +1228,22 @@ impl Transport {
         };
         self.opening = incoming;
         self.in_since_keys = 0;
+        self.in_bytes = 0;
         if self.strict() {
             self.in_seq = 0;
         }
+        let first = !self.first_kex_done;
         self.first_kex_done = true;
-        self.stage = Stage::Service;
-        if self.role == Role::Client {
+        self.stage = self.after_kex;
+        self.kexinit_sent = false;
+        if first && self.role == Role::Client {
             self.send(&Message::ServiceRequest(ServiceRequest::new(USERAUTH)));
         }
+        for payload in std::mem::take(&mut self.held) {
+            self.seal_and_write(&payload);
+        }
+        let steps = self.channels.resume();
+        self.run(steps);
     }
 
     fn on_service_request(&mut self, service: &str) {

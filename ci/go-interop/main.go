@@ -1,9 +1,11 @@
 // Command go-interop runs one x/crypto/ssh v0.55 connection against justssh for its tests.
 //
-//	go-interop server -kex K -cipher C -mac M -hostkeys H   listens on 127.0.0.1, prints the port, serves one connection
-//	go-interop client -addr A -kex K -cipher C -mac M -hostkeyalgs A   connects once
+//	go-interop server -kex K -cipher C -mac M -hostkeys H -rekey N -serve   listens on 127.0.0.1, prints the port, serves one connection
+//	go-interop client -addr A -kex K -cipher C -mac M -hostkeyalgs A -rekey N -requests R   connects once
 //
-// Empty -kex, -cipher, -mac and -hostkeyalgs leave x/crypto/ssh's defaults. Both sides
+// Empty -kex, -cipher, -mac and -hostkeyalgs leave x/crypto/ssh's defaults; -rekey sets
+// RekeyThreshold. With -requests the client sends R global requests of 1 KiB wanting a reply
+// once authenticated; with -serve the server stays until the client leaves, refusing requests. Both sides
 // authenticate user "alice" with password "pw". The server's host keys are, by -hostkeys:
 //
 //	ed25519   ed25519 from a seed of 32 bytes of 7 (the default)
@@ -47,15 +49,23 @@ func main() {
 	mac := fs.String("mac", "", "MACs, comma-separated")
 	hostKeys := fs.String("hostkeys", "ed25519", "server host keys: ed25519, broker or all")
 	hostKeyAlgs := fs.String("hostkeyalgs", "", "client host key algorithms, comma-separated")
+	rekey := fs.Uint64("rekey", 0, "RekeyThreshold in bytes")
+	requests := fs.Int("requests", 0, "global requests the client sends (client)")
+	stay := fs.Bool("serve", false, "stay until the client leaves (server)")
 	_ = fs.Parse(os.Args[2:])
-	algorithms := ssh.Config{KeyExchanges: list(*kex), Ciphers: list(*cipher), MACs: list(*mac)}
+	algorithms := ssh.Config{
+		KeyExchanges:   list(*kex),
+		Ciphers:        list(*cipher),
+		MACs:           list(*mac),
+		RekeyThreshold: *rekey,
+	}
 
 	var err error
 	switch os.Args[1] {
 	case "server":
-		err = serve(algorithms, *hostKeys)
+		err = serve(algorithms, *hostKeys, *stay)
 	case "client":
-		err = connect(*addr, algorithms, list(*hostKeyAlgs))
+		err = connect(*addr, algorithms, list(*hostKeyAlgs), *requests)
 	default:
 		err = fmt.Errorf("unknown mode %q", os.Args[1])
 	}
@@ -109,7 +119,7 @@ func signers(hostKeys string) ([]ssh.Signer, error) {
 	return out, nil
 }
 
-func serve(algorithms ssh.Config, hostKeys string) error {
+func serve(algorithms ssh.Config, hostKeys string, stay bool) error {
 	keys, err := signers(hostKeys)
 	if err != nil {
 		return err
@@ -148,10 +158,13 @@ func serve(algorithms ssh.Config, hostKeys string) error {
 		}
 	}()
 	fmt.Println("authenticated")
+	if stay {
+		return sconn.Wait()
+	}
 	return sconn.Close()
 }
 
-func connect(addr string, algorithms ssh.Config, hostKeyAlgs []string) error {
+func connect(addr string, algorithms ssh.Config, hostKeyAlgs []string, requests int) error {
 	config := &ssh.ClientConfig{
 		Config:            algorithms,
 		HostKeyAlgorithms: hostKeyAlgs,
@@ -170,5 +183,11 @@ func connect(addr string, algorithms ssh.Config, hostKeyAlgs []string) error {
 	}
 	go ssh.DiscardRequests(reqs)
 	fmt.Println("authenticated")
+	payload := make([]byte, 1024)
+	for i := 0; i < requests; i++ {
+		if _, _, err := cconn.SendRequest("justssh-test@example.com", true, payload); err != nil {
+			return fmt.Errorf("request %d: %w", i, err)
+		}
+	}
 	return cconn.Close()
 }

@@ -57,12 +57,13 @@ jobs:
           sudo ssh-keygen -q -t ecdsa -b 384 -N '' -f /etc/ssh/justssh_host_ecdsa384
           sudo ssh-keygen -q -t ecdsa -b 521 -N '' -f /etc/ssh/justssh_host_ecdsa521
           printf '%s\nPort 2207\nPidFile /run/sshd-hostkeys.pid\nHostKey /etc/ssh/justssh_host_rsa\nHostKey /etc/ssh/justssh_host_ecdsa384\nHostKey /etc/ssh/justssh_host_ecdsa521\nHostKeyAlgorithms +ssh-rsa\nPubkeyAuthentication no\nUsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\n' "$common" | sudo tee /etc/ssh/justssh-hostkeys.conf
+          printf '%s\nPort 2208\nPidFile /run/sshd-rekey.pid\nRekeyLimit 4K\nPubkeyAuthentication no\nUsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\n' "$common" | sudo tee /etc/ssh/justssh-rekey.conf
           printf '%s\n%s\nPort 2204\nPidFile /run/sshd-keys.pid\n' "$common" "$keys" | sudo tee /etc/ssh/justssh-keys.conf
           printf '%s\n%s\nPort 2205\nPidFile /run/sshd-keys-ssh-rsa.pid\nPubkeyAcceptedAlgorithms ssh-rsa,ssh-rsa-cert-v01@openssh.com\n' "$common" "$keys" | sudo tee /etc/ssh/justssh-keys-ssh-rsa.conf
-          for c in password pam keys keys-ssh-rsa hostkeys; do
+          for c in password pam keys keys-ssh-rsa hostkeys rekey; do
             sudo /usr/sbin/sshd -t -f /etc/ssh/justssh-$c.conf
           done
-          for c in password pam keys keys-ssh-rsa hostkeys; do
+          for c in password pam keys keys-ssh-rsa hostkeys rekey; do
             sudo /usr/sbin/sshd -f /etc/ssh/justssh-$c.conf
           done
 
@@ -100,6 +101,7 @@ jobs:
           JUSTSSH_SSHD_KEYS_DIR: /tmp/justssh-keys
           JUSTSSH_SSHD_MLKEM_ADDR: 127.0.0.1:2206
           JUSTSSH_SSHD_HOSTKEYS_ADDR: 127.0.0.1:2207
+          JUSTSSH_SSHD_REKEY_ADDR: 127.0.0.1:2208
           JUSTSSH_SSHD_USER: justssh
           JUSTSSH_SSHD_SECRET: justssh-ci-only
         run: cargo test --workspace

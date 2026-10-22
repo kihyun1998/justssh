@@ -55,3 +55,7 @@ A new channel takes the next id not in use, so ids reach 2^32 before any is reus
 ## The number of channels is the consumer's to limit
 
 Nothing caps how many channels a peer opens. An open stays in the table until the consumer accepts or rejects it, and `Session::next` reads only once its events are taken, so a consumer that answers every open keeps the table bounded by what it accepts. x/crypto/ssh stops reading at 16 unanswered opens and OpenSSH's sshd allows 10 sessions; here the limit is the consumer's policy, and the broker accepts only `session`. The maintainer chose this on #5.
+
+## A key re-exchange holds what is sent
+
+While a key exchange is under way, what is queued on channels stays there, counted by `ChannelInfo::queued`, and goes out once it ends; so `Session::data` waits through the exchange as it waits for the window. A client's re-exchange stops for the host key to be judged, which only the consumer can do: `Session::data` then returns with its data still queued, and `next` hands over the `Action::VerifyHostKey`. Waiting on for the window instead hung the upload, since the server's window adjust waits for the client's `SSH_MSG_NEWKEYS` (measured on #12; against OpenSSH it ended with `InputOverflow`, as sshd sends what it queued after its own `SSH_MSG_NEWKEYS`). Replies, window adjusts and channel opens, which are not queued on a channel, are held by the transport (see `transport-handshake.md`).

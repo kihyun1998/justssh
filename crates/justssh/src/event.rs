@@ -306,6 +306,8 @@ pub enum Error {
     ChannelWindowOverflow,
     /// A sequence number would repeat under one key.
     SequenceWrap,
+    /// Too much was sent while a key exchange was under way.
+    ExchangeBacklog,
 }
 
 impl fmt::Display for Error {
@@ -337,6 +339,7 @@ impl fmt::Display for Error {
             Error::ChannelWindowOverflow => f.write_str("channel window overflow"),
             Error::InvalidChannelMaxPacket => f.write_str("invalid channel maximum packet"),
             Error::SequenceWrap => f.write_str("sequence number would repeat under one key"),
+            Error::ExchangeBacklog => f.write_str("too much held back during a key exchange"),
         }
     }
 }

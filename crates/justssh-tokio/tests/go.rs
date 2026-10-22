@@ -8,10 +8,10 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use justssh::{
-    Algorithms, Client, ClientConfig, EcdsaCurve, HostKey, InfoRequest, KexInitRecord, PrivateKey,
-    Server, ServerConfig, Zeroizing,
+    Action, Algorithms, Client, ClientConfig, DisconnectReason, EcdsaCurve, HostKey, InfoRequest,
+    KexInitRecord, PrivateKey, Server, ServerConfig, Zeroizing,
 };
-use justssh_tokio::{Accepted, AuthMethod, ClientHandler, Connected, Deadlines};
+use justssh_tokio::{Accepted, AuthMethod, ClientHandler, Connected, Deadlines, Session};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
@@ -436,4 +436,223 @@ async fn the_client_offers_a_go_clients_host_key_algorithms_without_certificates
     let client = go_server(&go, "", "", "").await;
     let we_offer = host_key_algorithms(client.handshake().local_kexinit().unwrap());
     assert_eq!(we_offer, go_offers);
+}
+
+/// The cipher the rekey tests run under: its nonce is the sequence number, so a sequence number
+/// that is not reset as strict KEX asks fails the next packet. AES-GCM would not show it.
+const CHACHA: &str = "chacha20-poly1305@openssh.com";
+
+/// Whether a KEXINIT is one of a key re-exchange: without the strict KEX and ext-info markers.
+fn rekeyed(k: &KexInitRecord) -> bool {
+    !k.message()
+        .kex_algorithms
+        .iter()
+        .any(|n| n.starts_with("kex-strict-") || n.starts_with("ext-info-"))
+}
+
+/// A Go client with `args` against a justssh server with `config`, run through the connection
+/// protocol until the client leaves; the global requests answered, and whether the server's last
+/// KEXINIT was one of a key re-exchange.
+async fn go_client_session(go: &PathBuf, args: Vec<String>, config: ServerConfig) -> (usize, bool) {
+    let label = args.join(" ");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let child = Command::new(go)
+        .arg("client")
+        .args(["-addr", &addr])
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let (stream, _) = timeout(LIMIT, listener.accept()).await.unwrap().unwrap();
+    let mut server = Server::new(config);
+    let accepted = timeout(
+        LIMIT,
+        justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
+            let ok = r.user() == b"alice" && r.password() == b"pw";
+            async move { ok.then_some(()) }
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Accepted::Authenticated { io, events, .. } = accepted else {
+        panic!("{label}: {accepted:?}");
+    };
+    let mut session = Session::new(io, server, events);
+    let mut answered = 0;
+    loop {
+        match timeout(LIMIT, session.next()).await.unwrap() {
+            Ok(Some(Action::GlobalRequest(r))) => {
+                answered += 1;
+                if let Some(token) = r.reply() {
+                    session
+                        .reply_global(token, false, Vec::new())
+                        .await
+                        .unwrap();
+                }
+            }
+            Ok(Some(Action::Closed(_)) | None) | Err(_) => break,
+            Ok(Some(_)) => {}
+        }
+    }
+    let out = timeout(LIMIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "Go client {label}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let local = session.endpoint().handshake().local_kexinit().unwrap();
+    (answered, rekeyed(local))
+}
+
+/// The justssh client with `config` against a Go server with `args` that stays, sending
+/// `requests` global requests one after another; the replies, and the host keys accepted on key
+/// re-exchanges meanwhile.
+async fn go_server_session(
+    go: &PathBuf,
+    args: Vec<String>,
+    config: ClientConfig,
+    requests: usize,
+) -> (usize, usize) {
+    let label = args.join(" ");
+    let mut child = Command::new(go)
+        .arg("server")
+        .arg("-serve")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let port = timeout(LIMIT, lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("no port from the Go server");
+    let io = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    let mut client = Client::new(config);
+    let connected = timeout(
+        LIMIT,
+        justssh_tokio::connect(
+            io,
+            &mut client,
+            &Deadlines::new(),
+            &[AuthMethod::Password(Zeroizing::new(b"pw".to_vec()))],
+            &mut AcceptAll,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Connected::Authenticated { io, events } = connected else {
+        panic!("Go server {label}: {connected:?}");
+    };
+    let mut session = Session::new(io, client, events);
+    let (mut replies, mut rekeys) = (0, 0);
+    for _ in 0..requests {
+        let token = session
+            .global_request("justssh-test@example.com", true, vec![0; 1024])
+            .await
+            .unwrap();
+        loop {
+            match timeout(LIMIT, session.next()).await.unwrap().unwrap() {
+                Some(Action::VerifyHostKey { .. }) => {
+                    rekeys += 1;
+                    session.answer_host_key(true).await.unwrap();
+                }
+                Some(Action::GlobalRequestReply { token: t, .. }) if Some(t) == token => {
+                    replies += 1;
+                    break;
+                }
+                Some(Action::Closed(c)) => panic!("Go server {label}: {c:?}"),
+                None => panic!("Go server {label}: ended"),
+                Some(_) => {}
+            }
+        }
+    }
+    session
+        .disconnect(DisconnectReason::BY_APPLICATION, "done")
+        .await
+        .unwrap();
+    let _ = timeout(LIMIT, child.wait()).await;
+    (replies, rekeys)
+}
+
+#[tokio::test]
+async fn the_server_answers_the_rekeys_a_go_client_starts() {
+    let Some(go) = harness() else { return };
+    let args = vec![
+        "-rekey".into(),
+        "4096".into(),
+        "-requests".into(),
+        "100".into(),
+    ];
+    let (answered, rekeyed) = go_client_session(&go, args, broker_config()).await;
+    assert_eq!(answered, 100);
+    assert!(rekeyed);
+}
+
+#[tokio::test]
+async fn a_go_client_answers_the_rekeys_the_server_starts() {
+    let Some(go) = harness() else { return };
+    let config = ServerConfig::builder(ed25519())
+        .rekey_threshold(4096)
+        .build();
+    let (answered, rekeyed) = go_client_session(
+        &go,
+        vec![
+            "-cipher".into(),
+            CHACHA.into(),
+            "-requests".into(),
+            "100".into(),
+        ],
+        config,
+    )
+    .await;
+    assert_eq!(answered, 100);
+    assert!(rekeyed);
+}
+
+#[tokio::test]
+async fn the_client_answers_the_rekeys_a_go_server_starts() {
+    let Some(go) = harness() else { return };
+    let (replies, rekeys) = go_server_session(
+        &go,
+        vec![
+            "-cipher".into(),
+            CHACHA.into(),
+            "-rekey".into(),
+            "4096".into(),
+        ],
+        ClientConfig::builder(b"alice").build(),
+        100,
+    )
+    .await;
+    assert_eq!(replies, 100);
+    assert!(rekeys > 10, "{rekeys} rekeys");
+}
+
+#[tokio::test]
+async fn a_go_server_answers_the_rekeys_the_client_starts() {
+    let Some(go) = harness() else { return };
+    let (replies, rekeys) = go_server_session(
+        &go,
+        Vec::new(),
+        ClientConfig::builder(b"alice")
+            .rekey_threshold(4096)
+            .build(),
+        100,
+    )
+    .await;
+    assert_eq!(replies, 100);
+    assert!(rekeys > 10, "{rekeys} rekeys");
 }

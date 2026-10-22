@@ -120,8 +120,18 @@ async fn sshd_announces_its_server_sig_algs() {
 
 /// A session to `addr` past authentication.
 async fn session_to(addr: &str, user: &[u8], password: &[u8]) -> Session<TcpStream, Client> {
+    session_configured(addr, user, password, |b| b).await
+}
+
+/// As [`session_to`], with the client configured by `edit`.
+async fn session_configured(
+    addr: &str,
+    user: &[u8],
+    password: &[u8],
+    edit: impl FnOnce(justssh::ClientConfigBuilder) -> justssh::ClientConfigBuilder,
+) -> Session<TcpStream, Client> {
     let io = TcpStream::connect(addr).await.unwrap();
-    let mut client = Client::new(ClientConfig::builder(user).build());
+    let mut client = Client::new(edit(ClientConfig::builder(user)).build());
     let mut broker = Broker {
         password: password.to_vec(),
         prompts: Vec::new(),
@@ -140,16 +150,25 @@ async fn session_to(addr: &str, user: &[u8], password: &[u8]) -> Session<TcpStre
     }
 }
 
-/// The next action that is not a request from the server; requests wanting a reply are refused
-/// and keepalives counted in `keepalives`.
-async fn next_answering(
-    session: &mut Session<TcpStream, Client>,
-    keepalives: &mut usize,
-) -> Action {
+/// What [`next_answering`] answered on the way.
+#[derive(Default)]
+struct Answered {
+    keepalives: usize,
+    /// Host keys accepted on key re-exchanges.
+    rekeys: usize,
+}
+
+/// The next action that is not a request from the server or a host key to judge; requests
+/// wanting a reply are refused, host keys accepted, and both counted in `seen`.
+async fn next_answering(session: &mut Session<TcpStream, Client>, seen: &mut Answered) -> Action {
     loop {
         match session.next().await.unwrap().expect("connection ended") {
+            Action::VerifyHostKey { .. } => {
+                seen.rekeys += 1;
+                session.answer_host_key(true).await.unwrap();
+            }
             Action::GlobalRequest(r) => {
-                *keepalives += usize::from(r.kind() == "keepalive@openssh.com");
+                seen.keepalives += usize::from(r.kind() == "keepalive@openssh.com");
                 if let Some(token) = r.reply() {
                     session
                         .reply_global(token, false, Vec::new())
@@ -158,7 +177,7 @@ async fn next_answering(
                 }
             }
             Action::ChannelRequest(r) if r.kind() == "keepalive@openssh.com" => {
-                *keepalives += 1;
+                seen.keepalives += 1;
                 if let Some(token) = r.reply() {
                     session.reply(token, false).await.unwrap();
                 }
@@ -174,17 +193,18 @@ struct Exec {
     stderr: Vec<u8>,
     status: u32,
     keepalives: usize,
+    rekeys: usize,
 }
 
 /// Runs `command` on a new session channel.
 async fn exec(session: &mut Session<TcpStream, Client>, command: &str) -> Exec {
-    let mut keepalives = 0;
+    let mut seen = Answered::default();
     let channel = session
         .open_channel("session", Vec::new())
         .await
         .unwrap()
         .unwrap();
-    match next_answering(session, &mut keepalives).await {
+    match next_answering(session, &mut seen).await {
         Action::ChannelOpened { channel: c, .. } if c == channel => {}
         other => panic!("not opened: {other:?}"),
     }
@@ -193,7 +213,7 @@ async fn exec(session: &mut Session<TcpStream, Client>, command: &str) -> Exec {
     let token = session.request(channel, "exec", true, data).await.unwrap();
     let (mut stdout, mut stderr, mut status, mut replied) = (Vec::new(), Vec::new(), None, false);
     loop {
-        match next_answering(session, &mut keepalives).await {
+        match next_answering(session, &mut seen).await {
             Action::ChannelRequestReply { token: t, ok, .. } if Some(t) == token => {
                 assert!(ok, "exec refused");
                 replied = true;
@@ -218,7 +238,8 @@ async fn exec(session: &mut Session<TcpStream, Client>, command: &str) -> Exec {
         stdout,
         stderr,
         status: status.expect("no exit-status"),
-        keepalives,
+        keepalives: seen.keepalives,
+        rekeys: seen.rekeys,
     }
 }
 
@@ -274,8 +295,8 @@ async fn unknown_channel_type_on(var: &str) {
         .open_channel("no-such-type@justssh", Vec::new())
         .await
         .unwrap();
-    let mut keepalives = 0;
-    match next_answering(&mut session, &mut keepalives).await {
+    let mut seen = Answered::default();
+    match next_answering(&mut session, &mut seen).await {
         Action::ChannelOpenFailed {
             channel: c,
             reason,
@@ -855,4 +876,51 @@ async fn the_client_verifies_each_host_key_algorithm_of_sshd() {
             assert_eq!(algs.host_key(), *algorithm, "{var}");
         }
     }
+}
+
+/// The client offering only chacha20-poly1305, whose nonce is the sequence number, so a sequence
+/// number that is not reset as strict KEX asks fails the next packet; AES-GCM would not show it.
+fn chacha(b: justssh::ClientConfigBuilder) -> justssh::ClientConfigBuilder {
+    b.algorithms(
+        &["curve25519-sha256"],
+        &["chacha20-poly1305@openssh.com"],
+        &["hmac-sha2-256"],
+    )
+}
+
+/// Runs five commands, each printing 60,000 bytes, on the sshd in `var` with the client
+/// configured by `edit`; the host keys accepted on key re-exchanges meanwhile.
+async fn large_outputs_from(
+    var: &str,
+    edit: impl FnOnce(justssh::ClientConfigBuilder) -> justssh::ClientConfigBuilder,
+) -> Option<usize> {
+    let (addr, user, password) = target(var)?;
+    let mut session = session_configured(&addr, &user, &password, edit).await;
+    let mut rekeys = 0;
+    for _ in 0..5 {
+        let run = exec(&mut session, "head -c 60000 /dev/zero").await;
+        assert_eq!((run.stdout.len(), run.status), (60_000, 0));
+        rekeys += run.rekeys;
+    }
+    Some(rekeys)
+}
+
+#[tokio::test]
+async fn the_client_answers_the_rekeys_an_sshd_with_a_low_rekey_limit_starts() {
+    let Some(rekeys) = large_outputs_from("JUSTSSH_SSHD_REKEY_ADDR", chacha).await else {
+        return;
+    };
+    assert!(rekeys > 10, "{rekeys} rekeys");
+}
+
+#[tokio::test]
+async fn sshd_answers_the_rekeys_the_client_starts_after_a_low_threshold() {
+    let Some(rekeys) = large_outputs_from("JUSTSSH_SSHD_PASSWORD_ADDR", |b| {
+        chacha(b).rekey_threshold(4096)
+    })
+    .await
+    else {
+        return;
+    };
+    assert!(rekeys >= 4, "{rekeys} rekeys");
 }

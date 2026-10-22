@@ -258,6 +258,8 @@ pub(crate) struct Channels {
     /// Sent global requests that asked for a reply and have not had one, as token sequence
     /// numbers.
     global_awaiting: VecDeque<u64>,
+    /// Whether a key exchange is under way: what is queued on channels waits until it ends.
+    paused: bool,
 }
 
 /// A global reply the consumer has given: success and the data after the message number.
@@ -277,6 +279,7 @@ impl Channels {
             open: BTreeMap::new(),
             global_replies: VecDeque::new(),
             global_awaiting: VecDeque::new(),
+            paused: false,
         }
     }
 
@@ -328,6 +331,21 @@ impl Channels {
     /// The number of `id` when it belongs to this connection.
     fn local(&self, id: ChannelId) -> Option<u32> {
         (id.connection == self.connection).then_some(id.id)
+    }
+
+    /// Holds what is queued on channels until [`resume`](Self::resume).
+    pub(crate) fn pause(&mut self) {
+        self.paused = true;
+    }
+
+    /// Sends what the windows allow of what was held.
+    pub(crate) fn resume(&mut self) -> Vec<Step> {
+        self.paused = false;
+        let mut steps = Vec::new();
+        for c in self.open.values_mut() {
+            flush(c, &mut steps);
+        }
+        steps
     }
 
     pub(crate) fn info(&self, id: ChannelId) -> Option<ChannelInfo> {
@@ -404,6 +422,7 @@ impl Channels {
                 })));
             }
             Message::ChannelWindowAdjust(a) => {
+                let paused = self.paused;
                 let Some(c) = self.accepted(a.recipient, &mut steps) else {
                     return steps;
                 };
@@ -417,7 +436,9 @@ impl Channels {
                         return steps;
                     }
                 }
-                flush(c, &mut steps);
+                if !paused {
+                    flush(c, &mut steps);
+                }
             }
             Message::ChannelData(d) => self.data(d.recipient, None, d.data, &mut steps),
             Message::ChannelExtendedData(e) => {
@@ -517,7 +538,9 @@ impl Channels {
                     channel: channel_id(m.recipient),
                     data: m.data,
                 }));
-                flush(c, &mut steps);
+                if !self.paused {
+                    flush(c, &mut steps);
+                }
             }
             Message::ChannelOpenFailure(m) => {
                 let Some(c) = self.open.get_mut(&m.recipient).filter(|c| c.opening) else {
@@ -677,7 +700,9 @@ impl Channels {
             OutKind::Close => Out::Close,
         };
         c.queue.push_back(out);
-        flush(c, &mut steps);
+        if !self.paused {
+            flush(c, &mut steps);
+        }
         steps
     }
 
@@ -708,7 +733,9 @@ impl Channels {
             want_reply.then_some(seq),
             data,
         ));
-        flush(c, &mut steps);
+        if !self.paused {
+            flush(c, &mut steps);
+        }
         if want_reply {
             self.next_seq += 1;
         }
@@ -731,7 +758,9 @@ impl Channels {
         fail_queued(c, &mut steps);
         c.queue.clear();
         c.queue.push_back(Out::Close);
-        flush(c, &mut steps);
+        if !self.paused {
+            flush(c, &mut steps);
+        }
         steps
     }
 
