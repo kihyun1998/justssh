@@ -8,10 +8,9 @@ mod packet;
 mod userauth;
 mod version;
 
-use ed25519_dalek::{Signature, VerifyingKey};
 use justssh_wire::{
-    Disconnect, ExtInfo, KexEcdhInit, KexEcdhReply, KexInit, Message, NewKeys, Pong, Reader,
-    ServiceAccept, ServiceRequest, Unimplemented, UserauthFailure, UserauthSuccess, number,
+    Disconnect, ExtInfo, KexEcdhInit, KexEcdhReply, KexInit, Message, NewKeys, Pong, ServiceAccept,
+    ServiceRequest, Unimplemented, UserauthFailure, UserauthSuccess, number,
 };
 use zeroize::Zeroizing;
 
@@ -56,6 +55,7 @@ struct PendingKex {
 #[derive(Clone)]
 pub(crate) struct Preference {
     kex: Vec<String>,
+    host_key: Vec<String>,
     cipher: Vec<String>,
     mac: Vec<String>,
     /// The server-to-client lists, where they differ from `cipher` and `mac`.
@@ -71,6 +71,7 @@ impl Default for Preference {
     fn default() -> Self {
         Preference {
             kex: names(negotiate::KEX),
+            host_key: names(negotiate::HOST_KEY),
             cipher: names(negotiate::CIPHER),
             mac: names(negotiate::MAC),
             server_to_client: None,
@@ -86,6 +87,12 @@ impl Preference {
         self.kex = names(kex);
         self.cipher = names(ciphers);
         self.mac = names(macs);
+    }
+
+    /// Offers only `algorithms` as host key algorithms (a client's).
+    #[cfg(feature = "test-support")]
+    pub(crate) fn set_host_keys(&mut self, algorithms: &[&str]) {
+        self.host_key = names(algorithms);
     }
 
     /// Offers `ciphers` and `macs` for the server-to-client direction only.
@@ -105,7 +112,8 @@ struct Exchange {
 
 pub(crate) struct Transport {
     role: Role,
-    host_key: Option<HostKey>,
+    /// A server's host keys, in the order offered; none for a client.
+    host_keys: Vec<HostKey>,
     rng: BoxRng,
     started: bool,
     phase: Phase,
@@ -148,7 +156,7 @@ impl Transport {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         role: Role,
-        host_key: Option<HostKey>,
+        host_keys: Vec<HostKey>,
         client_user: Option<Vec<u8>>,
         rng: BoxRng,
         local_version: String,
@@ -158,7 +166,7 @@ impl Transport {
     ) -> Self {
         Transport {
             role,
-            host_key,
+            host_keys,
             rng,
             started: false,
             phase: Phase::Handshake,
@@ -580,9 +588,14 @@ impl Transport {
                 .to_owned(),
             );
         }
-        k.server_host_key_algorithms = match &self.host_key {
-            Some(h) => vec![h.algorithm().to_owned()],
-            None => names(negotiate::HOST_KEY),
+        k.server_host_key_algorithms = match self.role {
+            Role::Server => self
+                .host_keys
+                .iter()
+                .flat_map(|h| h.algorithms())
+                .map(|a| (*a).to_owned())
+                .collect(),
+            Role::Client => preference.host_key.clone(),
         };
         let (cipher_s2c, mac_s2c) = preference
             .server_to_client
@@ -753,15 +766,25 @@ impl Transport {
         let Some((q_s, k)) = kex::server_respond(method, q_c, &mut *self.rng) else {
             return self.fail(DisconnectReason::KEY_EXCHANGE_FAILED, Error::KeyExchange);
         };
-        let host_key = self.host_key.clone().expect("server has a host key");
-        let k_s = host_key.public_blob();
+        let algorithm = self
+            .handshake
+            .negotiated
+            .as_ref()
+            .map(|a| a.host_key.clone())
+            .expect("negotiated");
+        let key = self
+            .host_keys
+            .iter()
+            .position(|h| h.algorithms().contains(&algorithm.as_str()))
+            .expect("the negotiated host key algorithm is one the server offered");
+        let k_s = self.host_keys[key].public_blob();
         let h = self.exchange_hash(
             &k_s,
             &kex::hashed_public(method, q_c),
             &kex::hashed_public(method, &q_s),
             &k,
         );
-        let signature = host_key.sign(&h);
+        let signature = self.host_keys[key].sign(&algorithm, &h, &mut *self.rng);
         self.send(&Message::KexEcdhReply(KexEcdhReply::new(
             k_s, q_s, signature,
         )));
@@ -805,30 +828,9 @@ impl Transport {
             .handshake
             .negotiated
             .as_ref()
-            .map(|a| a.host_key.as_str());
-        let mut key = Reader::new(blob);
-        let mut sig = Reader::new(signature);
-        let parsed = (|| {
-            let key_alg = key.utf8().ok()?;
-            let key_bytes: [u8; 32] = key.string().ok()?.try_into().ok()?;
-            key.finish().ok()?;
-            let sig_alg = sig.utf8().ok()?;
-            let sig_bytes: [u8; 64] = sig.string().ok()?.try_into().ok()?;
-            sig.finish().ok()?;
-            Some((key_alg, key_bytes, sig_alg, sig_bytes))
-        })();
-        let Some((key_alg, key_bytes, sig_alg, sig_bytes)) = parsed else {
-            return false;
-        };
-        if Some(key_alg) != algorithm || sig_alg != key_alg {
-            return false;
-        }
-        let Ok(public) = VerifyingKey::from_bytes(&key_bytes) else {
-            return false;
-        };
-        public
-            .verify_strict(h, &Signature::from_bytes(&sig_bytes))
-            .is_ok()
+            .map(|a| a.host_key.as_str())
+            .expect("negotiated");
+        crate::key::verify(blob, algorithm, signature, h)
     }
 
     fn exchange_hash(&self, k_s: &[u8], q_c: &[u8], q_s: &[u8], k: &[u8]) -> Vec<u8> {

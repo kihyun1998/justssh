@@ -53,12 +53,16 @@ jobs:
           KbdInteractiveAuthentication no'
           printf '%s\nPort 2201\nPidFile /run/sshd-password.pid\nPubkeyAuthentication no\nUsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\nClientAliveInterval 1\nClientAliveCountMax 2\nKexAlgorithms +diffie-hellman-group14-sha256,diffie-hellman-group14-sha1\nMACs +hmac-sha1-96\n' "$common" | sudo tee /etc/ssh/justssh-password.conf
           printf '%s\nPort 2202\nPidFile /run/sshd-pam.pid\nPubkeyAuthentication no\nUsePAM yes\nPasswordAuthentication no\nKbdInteractiveAuthentication yes\n' "$common" | sudo tee /etc/ssh/justssh-pam.conf
+          sudo ssh-keygen -q -t rsa -b 2048 -N '' -f /etc/ssh/justssh_host_rsa
+          sudo ssh-keygen -q -t ecdsa -b 384 -N '' -f /etc/ssh/justssh_host_ecdsa384
+          sudo ssh-keygen -q -t ecdsa -b 521 -N '' -f /etc/ssh/justssh_host_ecdsa521
+          printf '%s\nPort 2207\nPidFile /run/sshd-hostkeys.pid\nHostKey /etc/ssh/justssh_host_rsa\nHostKey /etc/ssh/justssh_host_ecdsa384\nHostKey /etc/ssh/justssh_host_ecdsa521\nHostKeyAlgorithms +ssh-rsa\nPubkeyAuthentication no\nUsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\n' "$common" | sudo tee /etc/ssh/justssh-hostkeys.conf
           printf '%s\n%s\nPort 2204\nPidFile /run/sshd-keys.pid\n' "$common" "$keys" | sudo tee /etc/ssh/justssh-keys.conf
           printf '%s\n%s\nPort 2205\nPidFile /run/sshd-keys-ssh-rsa.pid\nPubkeyAcceptedAlgorithms ssh-rsa,ssh-rsa-cert-v01@openssh.com\n' "$common" "$keys" | sudo tee /etc/ssh/justssh-keys-ssh-rsa.conf
-          for c in password pam keys keys-ssh-rsa; do
+          for c in password pam keys keys-ssh-rsa hostkeys; do
             sudo /usr/sbin/sshd -t -f /etc/ssh/justssh-$c.conf
           done
-          for c in password pam keys keys-ssh-rsa; do
+          for c in password pam keys keys-ssh-rsa hostkeys; do
             sudo /usr/sbin/sshd -f /etc/ssh/justssh-$c.conf
           done
 
@@ -95,6 +99,7 @@ jobs:
           JUSTSSH_SSHD_SSH_RSA_ADDR: 127.0.0.1:2205
           JUSTSSH_SSHD_KEYS_DIR: /tmp/justssh-keys
           JUSTSSH_SSHD_MLKEM_ADDR: 127.0.0.1:2206
+          JUSTSSH_SSHD_HOSTKEYS_ADDR: 127.0.0.1:2207
           JUSTSSH_SSHD_USER: justssh
           JUSTSSH_SSHD_SECRET: justssh-ci-only
         run: cargo test --workspace

@@ -6,7 +6,7 @@ We depend only on the latest **stable** release of each RustCrypto crate and nev
 
 Most of the new generation is already stable as of 2026-10: digest 0.11, sha2 0.11, ed25519- and x25519-dalek 3, ml-kem 0.3 and rand_core 0.10. Those builds line up with sspi, so we take them.
 
-rsa is the exception, because its new line is still a release candidate. We use rsa 0.9, and the older digest, sha1 and rand_core it brings are confined to the RSA signing code.
+rsa is the exception, because its new line is still a release candidate. We use rsa 0.9, and the older digest, sha1 and rand_core it brings are confined to the code that signs and verifies RSA signatures.
 
 A CI check builds justssh together with IronRDP and sspi to keep that true. We will move to rsa 0.10 when it is released as stable.
 

@@ -1,8 +1,6 @@
-//! `connect` against real OpenSSH servers: one taking `password`, one taking only
-//! keyboard-interactive through PAM. CI starts both (`.github/workflows/test.yml`) and names them
-//! in `JUSTSSH_SSHD_PASSWORD_ADDR` and `JUSTSSH_SSHD_PAM_ADDR`, with the account in
-//! `JUSTSSH_SSHD_USER` and `JUSTSSH_SSHD_SECRET`. Without them each test is skipped, unless
-//! `JUSTSSH_REQUIRE_SSHD` is set.
+//! `connect` against the real OpenSSH servers CI starts (`.github/workflows/test.yml`), each named
+//! in a `JUSTSSH_SSHD_*_ADDR` variable, with the account in `JUSTSSH_SSHD_USER` and
+//! `JUSTSSH_SSHD_SECRET`. Without them each test is skipped, unless `JUSTSSH_REQUIRE_SSHD` is set.
 
 use justssh::{Action, Client, ClientConfig, InfoRequest, Phase, Zeroizing};
 use justssh_tokio::{AuthMethod, ClientHandler, Connected, Deadlines, Session};
@@ -681,14 +679,22 @@ async fn password_login_offering(
     mac: &str,
     strict: bool,
 ) -> Option<justssh::Algorithms> {
+    password_login_configured(var, &format!("{kex} {cipher} {mac}"), |b| {
+        b.algorithms(&[kex], &[cipher], &[mac]).strict_kex(strict)
+    })
+    .await
+}
+
+/// A password login to the sshd `var` names with the client configured by `edit`; the
+/// negotiated algorithms, or `None` to skip.
+async fn password_login_configured(
+    var: &str,
+    label: &str,
+    edit: impl FnOnce(justssh::ClientConfigBuilder) -> justssh::ClientConfigBuilder,
+) -> Option<justssh::Algorithms> {
     let (addr, user, password) = target(var)?;
     let io = TcpStream::connect(&addr).await.unwrap();
-    let mut client = Client::new(
-        ClientConfig::builder(&user)
-            .algorithms(&[kex], &[cipher], &[mac])
-            .strict_kex(strict)
-            .build(),
-    );
+    let mut client = Client::new(edit(ClientConfig::builder(&user)).build());
     let mut broker = Broker {
         password: password.clone(),
         prompts: Vec::new(),
@@ -705,7 +711,7 @@ async fn password_login_offering(
     .unwrap();
     assert!(
         matches!(connected, Connected::Authenticated { .. }),
-        "{kex} {cipher} {mac}: {connected:?}"
+        "{var} {label}: {connected:?}"
     );
     Some(client.handshake().negotiated().unwrap().clone())
 }
@@ -803,5 +809,50 @@ async fn the_client_logs_in_to_sshd_without_strict_kex() {
             return;
         };
         assert!(!algs.strict_kex(), "{mac}");
+    }
+}
+
+#[tokio::test]
+async fn the_client_verifies_each_host_key_algorithm_of_sshd() {
+    for (var, algorithms) in [
+        (
+            "JUSTSSH_SSHD_HOSTKEYS_ADDR",
+            &[
+                "ssh-rsa",
+                "rsa-sha2-256",
+                "rsa-sha2-512",
+                "ecdsa-sha2-nistp384",
+                "ecdsa-sha2-nistp521",
+                "ssh-ed25519",
+            ][..],
+        ),
+        (
+            "JUSTSSH_SSHD_RHEL9_ADDR",
+            &[
+                "rsa-sha2-256",
+                "rsa-sha2-512",
+                "ecdsa-sha2-nistp256",
+                "ssh-ed25519",
+            ][..],
+        ),
+        (
+            "JUSTSSH_SSHD_MLKEM_ADDR",
+            &[
+                "rsa-sha2-256",
+                "rsa-sha2-512",
+                "ecdsa-sha2-nistp256",
+                "ssh-ed25519",
+            ][..],
+        ),
+    ] {
+        for algorithm in algorithms {
+            let Some(algs) =
+                password_login_configured(var, algorithm, |b| b.host_key_algorithms(&[algorithm]))
+                    .await
+            else {
+                break;
+            };
+            assert_eq!(algs.host_key(), *algorithm, "{var}");
+        }
     }
 }
