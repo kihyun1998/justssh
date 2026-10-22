@@ -852,7 +852,8 @@ impl Channels {
     }
 
     /// Records that the consumer has taken `n` bytes from channel `id`, and gives window back
-    /// once more than three maximum packets have been taken or the window is below half.
+    /// once more than three maximum packets are received and not given back, or the window is
+    /// below half.
     pub(crate) fn consumed(&mut self, id: ChannelId, n: u32) -> Vec<Step> {
         let Some(local) = self.local(id) else {
             return Vec::new();

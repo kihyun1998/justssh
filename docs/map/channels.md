@@ -4,7 +4,7 @@ How the connection protocol's channels (`crates/justssh/src/connection.rs`) move
 
 ## The window is given back as the consumer consumes
 
-Data received on a channel is handed over as `Action::ChannelData`; the window is credited only when the consumer reports it with `channel_consumed`, batched the way x/crypto/ssh's `adjustWindow` does (once more than three maximum packets have been consumed, or the window is below half). A relay that reports only after forwarding gets x/crypto/ssh's backpressure: when the far side stops taking data, this side's window closes and the peer stops sending.
+Data received on a channel is handed over as `Action::ChannelData`; the window is credited only when the consumer reports it with `channel_consumed`, batched the way x/crypto/ssh's `adjustWindow` does (once more than three maximum packets have been received and not yet given back, or the window is below half; `adjustWindow` tests the window, not the bytes consumed). A relay that reports only after forwarding gets x/crypto/ssh's backpressure: when the far side stops taking data, this side's window closes and the peer stops sending.
 
 ## Nothing overtakes queued data
 

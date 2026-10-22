@@ -179,6 +179,16 @@ fn a_known_number_out_of_place_after_authentication_still_ends_the_connection() 
     ));
 }
 
+#[test]
+fn a_message_60_after_authentication_ends_the_connection() {
+    let (mut server, mut client) = connected();
+    let actions = send(&mut server, &mut client, &[Message::Unknown(60)]);
+    assert!(matches!(
+        local_error(&actions),
+        Some(Error::UnexpectedMessage { number: 60 })
+    ));
+}
+
 /// A server and a raw-mode client in user authentication.
 fn authenticating() -> (justssh::Server, justssh::Client) {
     let (mut server, mut client) = (server(), client());
