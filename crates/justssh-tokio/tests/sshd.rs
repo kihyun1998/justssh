@@ -517,7 +517,7 @@ fn keys_dir() -> Option<String> {
     };
     static SETUP: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     SETUP.get_or_init(|| {
-        let lines: String = authorised_keys()
+        let mut lines: String = authorised_keys()
             .iter()
             .map(|(name, key)| {
                 let blob = key.public_blob();
@@ -525,6 +525,9 @@ fn keys_dir() -> Option<String> {
                 format!("{} {} {name}\n", r.utf8().unwrap(), base64(&blob))
             })
             .collect();
+        for (name, _) in KEY_FILES {
+            lines.push_str(&std::fs::read_to_string(key_file(&format!("{name}.pub"))).unwrap());
+        }
         std::fs::write(format!("{dir}/authorized_keys"), lines).unwrap();
         let ca = format!("{dir}/ca");
         let _ = std::fs::remove_file(&ca);
@@ -610,6 +613,42 @@ async fn logs_in_to_sshd_with_ed25519_ecdsa_and_rsa_keys() {
             assert_eq!(algorithm, "rsa-sha2-256");
         }
         eprintln!("{name}: signed under {algorithm}");
+    }
+}
+
+/// The OpenSSH key files `ssh-keygen` made for `justssh-keys`' tests, with their passphrases.
+const KEY_FILES: [(&str, Option<&str>); 7] = [
+    ("ed25519", None),
+    ("ed25519-pass", Some("correct horse")),
+    ("ecdsa256", None),
+    ("ecdsa384", None),
+    ("ecdsa521-pass-cbc", Some("correct horse")),
+    ("rsa2048", None),
+    ("rsa3072-pass", Some("correct horse")),
+];
+
+fn key_file(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../justssh-keys/tests/keys")
+        .join(name)
+}
+
+#[tokio::test]
+async fn logs_in_to_sshd_with_the_openssh_key_files_ssh_keygen_wrote() {
+    for (name, passphrase) in KEY_FILES {
+        let text = std::fs::read(key_file(name)).unwrap();
+        let key = justssh_keys::KeyFile::from_openssh(&text, passphrase.map(str::as_bytes))
+            .unwrap()
+            .private_key()
+            .clone();
+        let Some((connected, _)) = log_in_with_keys("JUSTSSH_SSHD_KEYS_ADDR", vec![key]).await
+        else {
+            return;
+        };
+        assert!(
+            matches!(connected, Connected::Authenticated { .. }),
+            "{name}: {connected:?}"
+        );
     }
 }
 

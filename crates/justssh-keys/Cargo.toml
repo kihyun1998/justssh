@@ -1,0 +1,28 @@
+[package]
+name = "justssh-keys"
+description = "Private key files for justssh: OpenSSH keys read and written"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+justssh.workspace = true
+justssh-wire.workspace = true
+aes.workspace = true
+ctr.workspace = true
+cbc = { version = "0.2", features = ["zeroize"] }
+bcrypt-pbkdf = { version = "0.11", features = ["zeroize"] }
+base64ct = { version = "1.8", features = ["alloc"] }
+rsa.workspace = true
+# The big integers rsa 0.9 uses, for the CRT coefficient a written RSA key stores.
+num-bigint-dig = { version = "0.8", features = ["zeroize"] }
+getrandom = { workspace = true, features = ["sys_rng"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+base64ct = { version = "1.8", features = ["alloc"] }
+
+[lints]
+workspace = true
