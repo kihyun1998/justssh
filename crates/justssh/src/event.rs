@@ -80,7 +80,7 @@ pub enum Action {
     ChannelOpenFailed {
         channel: ChannelId,
         reason: OpenFailureReason,
-        description: String,
+        description: Vec<u8>,
     },
     /// A channel request from the peer, passed through unparsed.
     ChannelRequest(ChannelRequest),

@@ -322,8 +322,8 @@ impl Message {
                 w.u8(number::CHANNEL_OPEN_FAILURE)
                     .u32(m.recipient)
                     .u32(m.reason)
-                    .string(m.description.as_bytes())
-                    .string(m.language.as_bytes());
+                    .string(&m.description)
+                    .string(&m.language);
             }
             Message::ChannelWindowAdjust(m) => {
                 w.u8(number::CHANNEL_WINDOW_ADJUST)
@@ -489,8 +489,7 @@ impl Message {
             }
             number::CHANNEL_OPEN_FAILURE => {
                 let (recipient, reason) = (r.u32()?, r.u32()?);
-                let description = String::from_utf8_lossy(r.string()?).into_owned();
-                let language = String::from_utf8_lossy(r.string()?).into_owned();
+                let (description, language) = (r.string()?.to_vec(), r.string()?.to_vec());
                 Message::ChannelOpenFailure(ChannelOpenFailure::new(
                     recipient,
                     reason,
@@ -739,16 +738,16 @@ impl ChannelOpenConfirmation {
 pub struct ChannelOpenFailure {
     pub recipient: u32,
     pub reason: u32,
-    pub description: String,
-    pub language: String,
+    pub description: Vec<u8>,
+    pub language: Vec<u8>,
 }
 
 impl ChannelOpenFailure {
     pub fn new(
         recipient: u32,
         reason: u32,
-        description: impl Into<String>,
-        language: impl Into<String>,
+        description: impl Into<Vec<u8>>,
+        language: impl Into<Vec<u8>>,
     ) -> Self {
         ChannelOpenFailure {
             recipient,

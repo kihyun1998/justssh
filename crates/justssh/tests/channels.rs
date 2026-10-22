@@ -137,7 +137,7 @@ fn an_open_can_be_refused_with_a_reason_and_message() {
         ),
     );
     assert!(matches!(&out[..], [Message::ChannelOpenFailure(f)]
-        if f.recipient == 9 && f.reason == 1 && f.description == "no"));
+        if f.recipient == 9 && f.reason == 1 && f.description == b"no"));
 }
 
 #[test]

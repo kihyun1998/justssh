@@ -28,7 +28,7 @@ fn channel_message() -> impl Strategy<Value = Message> {
             .prop_map(|(r, s, w, m, d)| {
                 Message::ChannelOpenConfirmation(ChannelOpenConfirmation::new(r, s, w, m, d))
             }),
-        (any::<u32>(), any::<u32>(), ".{0,24}", "[a-z-]{0,8}").prop_map(|(r, c, d, l)| {
+        (any::<u32>(), any::<u32>(), bytes(), bytes()).prop_map(|(r, c, d, l)| {
             Message::ChannelOpenFailure(ChannelOpenFailure::new(r, c, d, l))
         }),
         (any::<u32>(), any::<u32>())

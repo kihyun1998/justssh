@@ -25,7 +25,7 @@ pub trait Endpoint: sealed::Sealed {
         &mut self,
         channel: ChannelId,
         reason: OpenFailureReason,
-        description: &str,
+        description: &[u8],
     ) -> Vec<Action>;
     fn channel_data(&mut self, channel: ChannelId, data: &[u8]) -> Vec<Action>;
     fn channel_extended_data(&mut self, channel: ChannelId, code: u32, data: &[u8]) -> Vec<Action>;
@@ -108,10 +108,10 @@ macro_rules! connection_methods {
             &mut self,
             channel: $crate::ChannelId,
             reason: $crate::OpenFailureReason,
-            description: &str,
+            description: impl AsRef<[u8]>,
         ) -> Vec<Action> {
             self.transport
-                .channels(|c| c.reject(channel, reason, description))
+                .channels(|c| c.reject(channel, reason, description.as_ref()))
         }
 
         /// Sends `data` on `channel` after anything already queued there, as the peer's window
@@ -228,7 +228,7 @@ macro_rules! impl_endpoint {
                 &mut self,
                 channel: $crate::ChannelId,
                 reason: $crate::OpenFailureReason,
-                description: &str,
+                description: &[u8],
             ) -> Vec<Action> {
                 <$t>::reject_channel(self, channel, reason, description)
             }

@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 48bc5c0805f56254c157089438c64cbe97c83b089fb020e470ae73b2c967a673 # shrinks to m = ChannelRequest(ChannelRequest { recipient: 0, kind: "a", want_reply: false, data: [] })
 cc c9830560b29b7dd105ff4a03955c09038c0530a58be1973416474c2b86741523 # shrinks to m = ChannelExtendedData(ChannelExtendedData { recipient: 0, code: 0, data: [] })
+cc 64593c0471234b362ebdb17ca16723b20d0fd6f5f494863ffe3fefa18b724abb # shrinks to m = ChannelOpenFailure(ChannelOpenFailure { recipient: 0, reason: 0, description: [128], language: [] })

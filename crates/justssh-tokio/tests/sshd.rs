@@ -355,8 +355,11 @@ async fn unknown_channel_type_on(var: &str) {
         } => {
             assert_eq!(Some(c), channel);
             assert_eq!(
-                (reason, description.as_str()),
-                (justssh::OpenFailureReason::CONNECT_FAILED, "open failed")
+                (reason, &description[..]),
+                (
+                    justssh::OpenFailureReason::CONNECT_FAILED,
+                    &b"open failed"[..]
+                )
             );
         }
         other => panic!("not refused: {other:?}"),

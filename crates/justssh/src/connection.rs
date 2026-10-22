@@ -652,7 +652,7 @@ impl Channels {
         &mut self,
         id: ChannelId,
         reason: OpenFailureReason,
-        description: &str,
+        description: &[u8],
     ) -> Vec<Step> {
         let Some(n) = self.local(id) else {
             return Vec::new();

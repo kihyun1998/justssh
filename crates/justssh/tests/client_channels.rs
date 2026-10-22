@@ -68,15 +68,18 @@ fn a_channel_the_client_opens_is_confirmed_with_the_servers_data() {
     assert_eq!(info.peer_window(), 64 * 32 * 1024);
 }
 
+/// A refusal message that is not UTF-8.
+const NOT_UTF8: &[u8] = b"no route \x80\xff";
+
 #[test]
-fn a_refused_open_reports_the_servers_reason_and_message() {
+fn a_refused_open_reports_the_servers_reason_and_message_byte_for_byte() {
     let (mut server, mut client) = authenticated_pair();
     let (id, actions) = client.open_channel("x11", Vec::new());
     let at_server = to_server(&mut server, actions);
     let (server_id, _, _) = open_request(&at_server).unwrap();
     let back = to_client(
         &mut client,
-        server.reject_channel(server_id, OpenFailureReason::CONNECT_FAILED, "no route"),
+        server.reject_channel(server_id, OpenFailureReason::CONNECT_FAILED, NOT_UTF8),
     );
     let failed: Vec<_> = back
         .iter()
@@ -94,7 +97,7 @@ fn a_refused_open_reports_the_servers_reason_and_message() {
         [(
             id.unwrap(),
             OpenFailureReason::CONNECT_FAILED,
-            "no route".to_owned()
+            NOT_UTF8.to_vec()
         )]
     );
     assert!(client.channel_info(id.unwrap()).is_none());
@@ -294,7 +297,7 @@ fn a_channel_the_server_opens_can_be_refused_as_prohibited() {
             Action::ChannelOpenFailed { channel, reason, description }
                 if Some(*channel) == server_id
                     && *reason == OpenFailureReason::ADMINISTRATIVELY_PROHIBITED
-                    && description == "acwbroker does not accept upstream-initiated channels"
+                    && description == b"acwbroker does not accept upstream-initiated channels"
         )),
         "{back:?}"
     );
