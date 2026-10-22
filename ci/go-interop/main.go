@@ -1,7 +1,7 @@
 // Command go-interop runs one x/crypto/ssh v0.55 connection against justssh for its tests.
 //
-//	go-interop server -kex K -cipher C -mac M -hostkeys H -rekey N -serve   listens on 127.0.0.1, prints the port, serves one connection
-//	go-interop client -addr A -kex K -cipher C -mac M -hostkeyalgs A -rekey N -requests R -namehex H -printhostkey   connects once
+//	go-interop server -kex K -cipher C -mac M -hostkeys H -rekey N -serve -rejecthex H   listens on 127.0.0.1, prints the port, serves one connection
+//	go-interop client -addr A -kex K -cipher C -mac M -hostkeyalgs A -rekey N -requests R -namehex H -printhostkey -openrefused   connects once
 //	go-interop hostkey -type ed25519|rsa -out F   writes a host key as acwbroker does, prints its public key
 //	go-interop readkey -in F -passphrase P   reads a private key file, prints its public key
 //	go-interop readcert -hex H   parses a certificate blob as ParsePublicKey does
@@ -11,7 +11,10 @@
 // RekeyThreshold. With -requests the client sends R global requests of 1 KiB wanting a reply
 // once authenticated; with -namehex the client sends a global request, opens a channel and sends a
 // channel request all named by the hex bytes H, and fails unless each succeeds; with -serve the
-// server stays until the client leaves, refusing requests. Both sides
+// server stays until the client leaves, refusing requests. The server refuses every channel, with
+// the message "no channels" or, with -rejecthex, the hex bytes H; with -openrefused the client
+// opens a session channel, fails unless it is refused, and prints the reason and the message in
+// hex. Both sides
 // authenticate user "alice" with password "pw". The server's host keys are, by -hostkeys:
 //
 //	ed25519   ed25519 from a seed of 32 bytes of 7 (the default)
@@ -29,6 +32,7 @@ import (
 	"crypto/rsa"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -66,6 +70,8 @@ func main() {
 	in := fs.String("in", "", "the key file to read (readkey)")
 	passphrase := fs.String("passphrase", "", "the passphrase of the key file (readkey)")
 	certHex := fs.String("hex", "", "the certificate blob to parse, in hex (readcert)")
+	rejectHex := fs.String("rejecthex", "", "hex message the server refuses channels with (server)")
+	openRefused := fs.Bool("openrefused", false, "open a session channel, print how it was refused (client)")
 	nameHex := fs.String("namehex", "", "hex name of a global request, channel type and channel request the client sends, each wanting success (client)")
 	_ = fs.Parse(os.Args[2:])
 	algorithms := ssh.Config{
@@ -78,11 +84,17 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "server":
-		err = serve(algorithms, *hostKeys, *stay)
+		var reject []byte
+		if reject, err = hex.DecodeString(*rejectHex); err == nil {
+			if *rejectHex == "" {
+				reject = []byte("no channels")
+			}
+			err = serve(algorithms, *hostKeys, *stay, string(reject))
+		}
 	case "client":
 		var name []byte
 		if name, err = hex.DecodeString(*nameHex); err == nil {
-			err = connect(*addr, algorithms, list(*hostKeyAlgs), *requests, string(name), *printHostKey)
+			err = connect(*addr, algorithms, list(*hostKeyAlgs), *requests, string(name), *printHostKey, *openRefused)
 		}
 	case "hostkey":
 		err = writeHostKey(*keyType, *out)
@@ -145,7 +157,7 @@ func signers(hostKeys string) ([]ssh.Signer, error) {
 	return out, nil
 }
 
-func serve(algorithms ssh.Config, hostKeys string, stay bool) error {
+func serve(algorithms ssh.Config, hostKeys string, stay bool, reject string) error {
 	keys, err := signers(hostKeys)
 	if err != nil {
 		return err
@@ -180,7 +192,7 @@ func serve(algorithms ssh.Config, hostKeys string, stay bool) error {
 	go ssh.DiscardRequests(reqs)
 	go func() {
 		for c := range chans {
-			_ = c.Reject(ssh.Prohibited, "no channels")
+			_ = c.Reject(ssh.Prohibited, reject)
 		}
 	}()
 	fmt.Println("authenticated")
@@ -190,7 +202,7 @@ func serve(algorithms ssh.Config, hostKeys string, stay bool) error {
 	return sconn.Close()
 }
 
-func connect(addr string, algorithms ssh.Config, hostKeyAlgs []string, requests int, name string, printHostKey bool) error {
+func connect(addr string, algorithms ssh.Config, hostKeyAlgs []string, requests int, name string, printHostKey, openRefused bool) error {
 	hostKeyCallback := ssh.InsecureIgnoreHostKey()
 	if printHostKey {
 		hostKeyCallback = func(_ string, _ net.Addr, key ssh.PublicKey) error {
@@ -235,6 +247,17 @@ func connect(addr string, algorithms ssh.Config, hostKeyAlgs []string, requests 
 			return fmt.Errorf("channel request %q: ok=%v err=%v", name, ok, err)
 		}
 		_ = ch.Close()
+	}
+	if openRefused {
+		ch, _, err := cconn.OpenChannel("session", nil)
+		var refused *ssh.OpenChannelError
+		if !errors.As(err, &refused) {
+			if ch != nil {
+				_ = ch.Close()
+			}
+			return fmt.Errorf("session channel not refused: %v", err)
+		}
+		fmt.Printf("%d %x\n", refused.Reason, refused.Message)
 	}
 	return cconn.Close()
 }

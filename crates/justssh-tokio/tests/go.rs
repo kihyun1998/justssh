@@ -733,6 +733,142 @@ async fn a_go_client_naming_requests_and_a_channel_type_in_bytes_that_are_not_ut
     assert_eq!(names, [NAME; 3]);
 }
 
+/// A channel refusal message that is not UTF-8.
+const REFUSAL: &[u8] = b"no \x80\xe9 channels";
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[tokio::test]
+async fn a_go_servers_refusal_message_reaches_the_client_byte_for_byte() {
+    let Some(go) = harness() else {
+        return;
+    };
+    let mut child = Command::new(&go)
+        .args(["server", "-serve", "-rejecthex", &to_hex(REFUSAL)])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let port = timeout(LIMIT, lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("no port from the Go server");
+    let io = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    let mut client = Client::new(ClientConfig::builder(b"alice").build());
+    let connected = timeout(
+        LIMIT,
+        justssh_tokio::connect(
+            io,
+            &mut client,
+            &Deadlines::new(),
+            &[AuthMethod::Password(Zeroizing::new(b"pw".to_vec()))],
+            &mut AcceptAll,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Connected::Authenticated { io, events } = connected else {
+        panic!("{connected:?}");
+    };
+    let mut session = Session::new(io, client, events);
+    let opened = session.open_channel("session", Vec::new()).await.unwrap();
+    let refused = loop {
+        match timeout(LIMIT, session.next()).await.unwrap().unwrap() {
+            Some(Action::ChannelOpenFailed {
+                channel,
+                reason,
+                description,
+            }) => break (Some(channel), reason, description),
+            Some(Action::Closed(c)) => panic!("{c:?}"),
+            None => panic!("ended"),
+            Some(_) => {}
+        }
+    };
+    assert_eq!(
+        refused,
+        (
+            opened,
+            justssh::OpenFailureReason::ADMINISTRATIVELY_PROHIBITED,
+            REFUSAL.to_vec()
+        )
+    );
+    session
+        .disconnect(DisconnectReason::BY_APPLICATION, "done")
+        .await
+        .unwrap();
+    let _ = timeout(LIMIT, child.wait()).await;
+}
+
+#[tokio::test]
+async fn a_go_client_is_refused_with_the_message_the_server_gave_byte_for_byte() {
+    let Some(go) = harness() else {
+        return;
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let child = Command::new(&go)
+        .args(["client", "-addr", &addr, "-openrefused"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let (stream, _) = timeout(LIMIT, listener.accept()).await.unwrap().unwrap();
+    let mut server = Server::new(ServerConfig::builder(ed25519()).build());
+    let accepted = timeout(
+        LIMIT,
+        justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
+            let ok = r.user() == b"alice" && r.password() == b"pw";
+            async move { ok.then_some(()) }
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Accepted::Authenticated { io, events, .. } = accepted else {
+        panic!("{accepted:?}");
+    };
+    let mut session = Session::new(io, server, events);
+    loop {
+        match timeout(LIMIT, session.next()).await.unwrap() {
+            Ok(Some(Action::ChannelOpenRequest(r))) => {
+                session
+                    .reject_channel(
+                        r.channel(),
+                        justssh::OpenFailureReason::CONNECT_FAILED,
+                        REFUSAL,
+                    )
+                    .await
+                    .unwrap();
+            }
+            Ok(Some(Action::Closed(_)) | None) | Err(_) => break,
+            Ok(Some(_)) => {}
+        }
+    }
+    let out = timeout(LIMIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "Go client: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        stdout.lines().last(),
+        Some(format!("2 {}", to_hex(REFUSAL)).as_str())
+    );
+}
+
 /// What the harness printed for `args`, which must succeed.
 fn go_output(go: &PathBuf, args: &[&str]) -> String {
     let out = std::process::Command::new(go).args(args).output().unwrap();

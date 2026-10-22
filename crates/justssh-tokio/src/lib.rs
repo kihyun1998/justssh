@@ -261,9 +261,11 @@ where
         &mut self,
         channel: ChannelId,
         reason: OpenFailureReason,
-        description: &str,
+        description: impl AsRef<[u8]>,
     ) -> io::Result<()> {
-        let actions = self.endpoint.reject_channel(channel, reason, description);
+        let actions = self
+            .endpoint
+            .reject_channel(channel, reason, description.as_ref());
         self.send(actions).await
     }
 
