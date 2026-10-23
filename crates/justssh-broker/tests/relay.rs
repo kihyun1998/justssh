@@ -12,6 +12,7 @@ use justssh::{
     ServerConfig, Zeroizing,
 };
 use justssh_broker::caller::Caller;
+use justssh_broker::log::Log;
 use justssh_broker::tokens::{Config, Tokens};
 use justssh_broker::{broker, issue};
 use justssh_tokio::{Accepted, AuthMethod, ClientHandler, Connected, Deadlines, Session};
@@ -182,6 +183,11 @@ fn tokens() -> Tokens {
 
 /// The broker serving `tokens` to callers that all measure as [`CALLER`]; its address.
 async fn broker(tokens: Tokens) -> String {
+    broker_logging(tokens, Log::discard()).await
+}
+
+/// [`broker`] logging to `log`.
+async fn broker_logging(tokens: Tokens, log: Log) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let host_key = HostKey::ed25519_from_seed(Zeroizing::new([7; 32]));
@@ -190,9 +196,53 @@ async fn broker(tokens: Tokens) -> String {
         host_key,
         tokens,
         Duration::from_secs(15),
-        Arc::new(|_| Caller::new(CALLER)),
+        Arc::new(|_| {
+            let mut c = Caller::new(CALLER);
+            c.described = "pid=4242 image=putty.exe".to_owned();
+            c
+        }),
+        log,
     ));
     addr
+}
+
+/// The lines a log has written, shared with the test.
+#[derive(Clone, Default)]
+struct Lines(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Lines {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Lines {
+    fn log(&self) -> Log {
+        Log::clocked(self.clone(), None, || {
+            (std::time::SystemTime::UNIX_EPOCH, 0)
+        })
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+
+    /// Waits until a line holds `part`, and returns everything written by then.
+    async fn wait_for(&self, part: &str) -> String {
+        for _ in 0..500 {
+            let text = self.text();
+            if text.contains(part) {
+                return text;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no line holds {part:?}:\n{}", self.text());
+    }
 }
 
 /// A token for a password credential to `upstream`.
@@ -726,4 +776,124 @@ async fn a_disposed_token_ends_its_upstream_and_refuses_new_channels() {
     })
     .await
     .expect("timed out");
+}
+
+#[tokio::test]
+async fn an_authenticated_connection_logs_its_caller_channels_and_requests_but_no_secret() {
+    let tokens = tokens();
+    let token = issue(&tokens, &upstream().await);
+    let lines = Lines::default();
+    let addr = broker_logging(tokens, lines.log()).await;
+    let mut s = downstream(&addr, token.as_bytes()).await.expect("refused");
+    timeout(LIMIT, async {
+        settle(&mut s, b"secret-command-text").await;
+        settle(&mut s, b"again").await;
+        s.global_request("probe@justssh", false, Vec::new())
+            .await
+            .unwrap();
+        s.global_request("keepalive@openssh.com", false, Vec::new())
+            .await
+            .unwrap();
+        lines.wait_for("global request").await;
+        drop(s);
+        let text = lines.wait_for("closed: ").await;
+        let l = format!("listener={addr}");
+        for want in [
+            format!(
+                r#"level=INFO msg="authenticated: {l} caller=pid=4242 image=putty.exe verdict=unmeasured admitted=claim live=1""#
+            ),
+            format!(r#"level=INFO msg="channel: {l} id=1 type=session opened chans=1""#),
+            format!(r#"level=INFO msg="request: {l} id=1 type=exec""#),
+            format!(r#"level=INFO msg="channel: {l} id=1 type=session closed chans=0""#),
+            format!(r#"level=INFO msg="channel: {l} id=2 type=session opened chans=1""#),
+            format!(r#"level=INFO msg="global request: {l} type=probe@justssh""#),
+            format!(r#"level=INFO msg="closed: {l} live=0 reason=clean""#),
+        ] {
+            assert!(text.contains(&want), "{want}\nnot in\n{text}");
+        }
+        assert!(!text.contains("keepalive"), "{text}");
+        for secret in ["secret-command-text", &*token, "real-secret"] {
+            assert!(!text.contains(secret), "{secret} in\n{text}");
+        }
+    })
+    .await
+    .expect("timed out");
+}
+
+#[tokio::test]
+async fn a_refused_authentication_logs_why_and_what_each_side_offered() {
+    let tokens = tokens();
+    let token = issue(&tokens, &upstream().await);
+    let lines = Lines::default();
+    let addr = broker_logging(tokens, lines.log()).await;
+    assert!(
+        downstream(&addr, b"0123456789abcdef0123456789abcdef")
+            .await
+            .is_none()
+    );
+    let text = lines.wait_for("downstream handshake offers").await;
+    let l = format!("listener={addr}");
+    for want in [
+        format!(
+            r#"level=WARN msg="authentication failed: {l} caller=pid=4242 image=putty.exe verdict=unmeasured user=\"srv-7@10.0.0.9\" reason=acwbroker: no live token matches the presented password""#
+        ),
+        r#"level=ERROR msg="downstream handshake failed: "#.to_owned(),
+        format!(
+            r#"level=ERROR msg="downstream handshake offers: {l} client version=\"SSH-2.0-justssh\" kex="#
+        ),
+        "; server version=\\\"SSH-2.0-justssh\\\" kex=".to_owned(),
+    ] {
+        assert!(text.contains(&want), "{want}\nnot in\n{text}");
+    }
+    assert!(!text.contains("0123456789abcdef"), "{text}");
+    assert!(!text.contains(&*token), "{text}");
+}
+
+#[tokio::test]
+async fn an_upstream_that_refuses_the_credential_is_logged() {
+    let tokens = tokens();
+    let up = upstream().await;
+    let token = issue_with(&tokens, &up, b"not-the-secret");
+    let lines = Lines::default();
+    let addr = broker_logging(tokens, lines.log()).await;
+    assert!(downstream(&addr, token.as_bytes()).await.is_none());
+    let text = lines.wait_for("upstream authentication failed").await;
+    let want = format!(
+        r#"level=ERROR msg="upstream authentication failed: upstream {up}: unable to authenticate, attempted methods [none password], no supported methods remain""#
+    );
+    assert!(text.contains(&want), "{want}\nnot in\n{text}");
+    assert!(!text.contains("not-the-secret"), "{text}");
+}
+
+#[tokio::test]
+async fn refusals_are_logged_with_their_reason() {
+    let tokens = tokens();
+    let token = issue_without_file_transfer(&tokens, &upstream().await);
+    let lines = Lines::default();
+    let addr = broker_logging(tokens, lines.log()).await;
+    let mut first = downstream(&addr, token.as_bytes()).await.expect("refused");
+    let mut second = downstream(&addr, token.as_bytes()).await.expect("refused");
+    timeout(LIMIT, async {
+        let shell = open(&mut first).await;
+        assert!(ask(&mut first, shell, "shell", Vec::new()).await);
+        let ch = open(&mut first).await;
+        assert!(!ask(&mut first, ch, "subsystem", sftp()).await);
+        let ch = open(&mut second).await;
+        assert!(!ask(&mut second, ch, "shell", Vec::new()).await);
+    })
+    .await
+    .expect("timed out");
+    let text = lines.wait_for("already open").await;
+    let l = format!("listener={addr}");
+    for want in [
+        format!(r#"level=INFO msg="request: {l} id=2 type=subsystem name=sftp""#),
+        format!(
+            r#"level=WARN msg="request refused: {l} id=2 type=subsystem reason=the node does not allow file transfer""#
+        ),
+        format!(
+            r#"level=WARN msg="request refused: {l} id=1 type=shell reason=a shell is already open on this token""#
+        ),
+    ] {
+        assert!(text.contains(&want), "{want}\nnot in\n{text}");
+    }
 }

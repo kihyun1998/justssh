@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::handoff::{self, Kind, ReadError};
 use crate::issue::{self, IssueError};
+use crate::log::Log;
 use crate::tokens::Tokens;
 
 /// Why the session ended other than by the pipe closing between frames.
@@ -67,6 +68,7 @@ pub struct Session<R, W> {
     input: R,
     output: Pipe<W>,
     frozen: bool,
+    log: Log,
 }
 
 impl<R: Read, W: Write> Session<R, W> {
@@ -75,7 +77,13 @@ impl<R: Read, W: Write> Session<R, W> {
             input,
             output: Pipe(Arc::new(Mutex::new(output))),
             frozen: false,
+            log: Log::discard(),
         }
+    }
+
+    /// Logs why a request was refused to `log`.
+    pub fn set_log(&mut self, log: Log) {
+        self.log = log;
     }
 
     /// The writing half, for what tells the app unasked.
@@ -135,6 +143,17 @@ impl<R: Read, W: Write> Session<R, W> {
                 k if k == Kind::Issue as u8 && self.frozen => self.fail("frozen")?,
                 k if k == Kind::Issue as u8 => match issue::decode(&frame.payload) {
                     Ok(issue) if issue.terminal.is_some() => {
+                        self.log.warn(
+                            "terminal binding refused",
+                            &[
+                                ("terminal", issue.terminal.unwrap_or(0).into()),
+                                (
+                                    "err",
+                                    "peer: terminal binding is not implemented on this platform"
+                                        .into(),
+                                ),
+                            ],
+                        );
                         self.fail("terminal to bind the token to was not found")?;
                     }
                     Ok(issue) => {
@@ -167,7 +186,11 @@ impl<R: Read, W: Write> Session<R, W> {
                         });
                     match taken {
                         Ok(used) => self.write(Kind::Attached, &handoff::attached(used))?,
-                        Err(_) => self.fail("attach refused")?,
+                        Err(e) => {
+                            self.log
+                                .warn("attach refused", &[("err", e.to_string().into())]);
+                            self.fail("attach refused")?
+                        }
                     }
                 }
                 _ => return Err(self.refuse("unknown frame kind")),

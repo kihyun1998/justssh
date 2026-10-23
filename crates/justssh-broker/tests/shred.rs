@@ -92,7 +92,7 @@ fn admit_refuses_a_link() {
     let shredder = Shredder::new(vec![root.clone()]);
     assert_eq!(
         shredder.admit(s(&link)),
-        Err("the path is a link".to_owned())
+        Err("acwbroker: the path is a link".to_owned())
     );
     assert!(shredder.shred(s(&link)).is_err());
     assert!(target.exists(), "the link's target was removed");

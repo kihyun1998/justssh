@@ -46,7 +46,7 @@ struct Broker {
 impl Broker {
     fn start(dir: &Path, host_key: &Path, listen: &str) -> Broker {
         let mut child = Command::new(env!("CARGO_BIN_EXE_justssh-broker"))
-            .args(["-listen", listen, "-logpath"])
+            .args(["-listen", listen, "-profile", "prod A", "-logpath"])
             .arg(dir)
             .arg("-host-key")
             .arg(host_key)
@@ -228,6 +228,26 @@ fn the_broker_announces_itself_and_hands_out_a_token_per_issue() {
     assert!(b.issue(&password_issue(b"127.0.0.7:51201", &[])).is_ok());
 
     assert_eq!(b.finish(), (0, Vec::new()));
+    let log = std::fs::read_to_string(dir.join("acwbroker.log")).unwrap();
+    for want in [
+        r#"level=WARN msg="terminal binding refused" profile="prod A" terminal=268435460 err="peer: terminal binding is not implemented on this platform""#,
+        r#"level=WARN msg="attach refused" profile="prod A" err="acwbroker: no live token matches the presented password""#,
+        r#"level=WARN msg="attach refused" profile="prod A" err="acwbroker: the path is not directly under an attach root""#,
+    ] {
+        assert!(
+            log.contains(want),
+            "{want}
+not in
+{log}"
+        );
+    }
+    for secret in ["real-secret", &first, &second] {
+        assert!(
+            !log.contains(secret),
+            "{secret} in
+{log}"
+        );
+    }
 }
 
 #[test]
@@ -242,11 +262,12 @@ fn a_second_start_serves_the_host_key_the_first_one_made() {
     assert_eq!(second.ready().1, key);
     second.finish();
     assert_eq!(std::fs::read(&key_path).unwrap(), made);
-    let left: Vec<_> = std::fs::read_dir(&dir)
+    let mut left: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
-    assert_eq!(left, ["hostkey"]);
+    left.sort();
+    assert_eq!(left, ["acwbroker.log", "hostkey"]);
 }
 
 #[test]
@@ -424,4 +445,21 @@ fn a_frozen_broker_outlives_the_pipe_and_ends_with_its_tunnel() {
     tunnel.kill().unwrap();
     tunnel.wait().unwrap();
     assert_eq!(b.finish(), (0, Vec::new()));
+    let log = std::fs::read_to_string(dir.join("acwbroker.log")).unwrap();
+    let frozen = format!(
+        r#"msg="frozen: no new connections; staying until the tunnel exits" profile="prod A" tunnel={}"#,
+        tunnel.id()
+    );
+    for want in [
+        frozen.as_str(),
+        r#"msg="the app has let go; staying until the tunnel exits" profile="prod A""#,
+        r#"msg="the tunnel exited; shutting down" profile="prod A""#,
+    ] {
+        assert!(
+            log.contains(want),
+            "{want}
+not in
+{log}"
+        );
+    }
 }

@@ -75,10 +75,9 @@ Several parts of acwbroker are absent:
 - Memory sealing of held credentials. Credentials are held in zeroizing buffers instead.
 - The arrival check that reads a key and names a wrong passphrase.
 - Process hardening.
-- The log file.
 - The legacy RSA host key.
 
-`-logpath`, `-profile` and `-unsafe-no-harden` are accepted, as Go's `flag` package accepts them, and change nothing. `-dial-timeout` bounds the upstream TCP connect, read as Go's `time.ParseDuration` reads it. `-attach-root` names the roots ATTACH paths may be under. The SSH side is in `broker-relay.md`. Token lifetime and caller checks are in `broker-tokens.md`. Key credentials (#61) are still to come.
+`-unsafe-no-harden` is accepted, as Go's `flag` package accepts it, and changes nothing. `-logpath` and `-profile` name the log's folder and every line's profile (`broker-log.md`). `-dial-timeout` bounds the upstream TCP connect, read as Go's `time.ParseDuration` reads it. `-attach-root` names the roots ATTACH paths may be under. The SSH side is in `broker-relay.md`. Token lifetime and caller checks are in `broker-tokens.md`. Key credentials (#61) are still to come.
 
 ## The host key file
 

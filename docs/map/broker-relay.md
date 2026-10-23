@@ -45,7 +45,7 @@ A token no longer issued allows neither a shell nor a file transfer, as in Go.
 
 When the token is disposed of, the relay sends the upstream `SSH_MSG_DISCONNECT` and goes on as when the upstream ends: each open channel gets its EOF and is closed once its downstream half is done or after the grace, and a new channel is refused with `CONNECT_FAILED`. The downstream connection stays until the client ends it, as in Go.
 
-Go writes each `shell`, `exec` and `subsystem`, and each refusal, to its log. The minimal broker has no log yet.
+Each `shell`, `exec` and `subsystem`, and each refusal, is logged as Go logs it (`broker-log.md`).
 
 ## How it is proven
 
