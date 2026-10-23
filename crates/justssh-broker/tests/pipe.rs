@@ -262,10 +262,11 @@ fn a_second_start_serves_the_host_key_the_first_one_made() {
     assert_eq!(second.ready().1, key);
     second.finish();
     assert_eq!(std::fs::read(&key_path).unwrap(), made);
-    let left: Vec<_> = std::fs::read_dir(&dir)
+    let mut left: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
+    left.sort();
     assert_eq!(left, ["acwbroker.log", "hostkey"]);
 }
 
