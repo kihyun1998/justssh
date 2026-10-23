@@ -102,7 +102,7 @@ CI runs on Ubuntu, so the Windows code is linted there with `--target x86_64-pc-
 
 ## Not here
 
-- The verdict (in-tree, out-of-tree, unmeasured), the admission branch and the reasons for a disposal are only logged in Go, and the minimal broker has no log yet (#66).
+- The verdict (in-tree, out-of-tree, unmeasured), the admission branch and the reasons for a disposal are only logged, as in Go (`broker-log.md`).
 - On macOS, Go measures callers with libproc and resolves a terminal binding (0x17) to the processes holding it. That is left to a follow-up, by the maintainer's choice on #62. Meanwhile the pipe refuses a terminal-bound ISSUE (`handoff-pipe.md`), as Go does wherever the lookup is missing.
 
 ## How it is proven
