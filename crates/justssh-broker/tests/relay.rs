@@ -11,13 +11,16 @@ use justssh::{
     Action, ChannelId, Client, ClientConfig, HostKey, InfoRequest, OpenFailureReason, Server,
     ServerConfig, Zeroizing,
 };
-use justssh_broker::tokens::Tokens;
+use justssh_broker::caller::Caller;
+use justssh_broker::tokens::{Config, Tokens};
 use justssh_broker::{broker, issue};
 use justssh_tokio::{Accepted, AuthMethod, ClientHandler, Connected, Deadlines, Session};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
 const LIMIT: Duration = Duration::from_secs(30);
+/// The process every downstream connection measures as owned by.
+const CALLER: u32 = 4242;
 const USER: &[u8] = b"srv-7@10.0.0.9";
 const SECRET: &[u8] = b"real-secret";
 /// What the upstream refuses a channel type other than `session` with: not UTF-8.
@@ -172,7 +175,12 @@ async fn upstream_connection(stream: TcpStream, seen: Seen) {
     }
 }
 
-/// The broker serving `tokens`; its address.
+/// Tokens judged by acwbroker's defaults, with nothing asked of this machine.
+fn tokens() -> Tokens {
+    Tokens::new(Config::default(), tokio::runtime::Handle::current())
+}
+
+/// The broker serving `tokens` to callers that all measure as [`CALLER`]; its address.
 async fn broker(tokens: Tokens) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -182,6 +190,7 @@ async fn broker(tokens: Tokens) -> String {
         host_key,
         tokens,
         Duration::from_secs(15),
+        Arc::new(|_| Caller::new(CALLER)),
     ));
     addr
 }
@@ -298,7 +307,7 @@ async fn run(
 
 #[tokio::test]
 async fn an_exec_through_the_broker_brings_stdout_stderr_and_the_exit_status() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let token = issue(&tokens, &upstream().await);
     let addr = broker(tokens).await;
     let mut s = downstream(&addr, token.as_bytes()).await.expect("refused");
@@ -326,7 +335,7 @@ async fn an_exec_through_the_broker_brings_stdout_stderr_and_the_exit_status() {
 
 #[tokio::test]
 async fn a_shell_through_the_broker_echoes_and_ends_on_eof() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let token = issue(&tokens, &upstream().await);
     let addr = broker(tokens).await;
     let mut s = downstream(&addr, token.as_bytes()).await.expect("refused");
@@ -346,7 +355,7 @@ async fn a_shell_through_the_broker_echoes_and_ends_on_eof() {
 
 #[tokio::test]
 async fn a_wrong_token_is_refused() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let _ = issue(&tokens, &upstream().await);
     let addr = broker(tokens).await;
     assert!(downstream(&addr, &[b'a'; 32]).await.is_none());
@@ -354,7 +363,7 @@ async fn a_wrong_token_is_refused() {
 
 #[tokio::test]
 async fn a_channel_the_upstream_refuses_is_refused_downstream_with_its_reason_and_message() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let token = issue(&tokens, &upstream().await);
     let addr = broker(tokens).await;
     let mut s = downstream(&addr, token.as_bytes()).await.expect("refused");
@@ -388,7 +397,7 @@ async fn a_channel_the_upstream_refuses_is_refused_downstream_with_its_reason_an
 
 #[tokio::test]
 async fn a_channel_the_upstream_opens_is_refused_as_prohibited() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let token = issue(&tokens, &upstream().await);
     let addr = broker(tokens).await;
     let mut s = downstream(&addr, token.as_bytes()).await.expect("refused");
@@ -410,7 +419,7 @@ async fn a_channel_the_upstream_opens_is_refused_as_prohibited() {
 
 #[tokio::test]
 async fn a_global_request_goes_upstream_and_its_answer_comes_back() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let token = issue(&tokens, &upstream().await);
     let addr = broker(tokens).await;
     let mut s = downstream(&addr, token.as_bytes()).await.expect("refused");
@@ -432,7 +441,7 @@ async fn a_global_request_goes_upstream_and_its_answer_comes_back() {
 
 #[tokio::test]
 async fn an_upstream_that_refuses_the_credential_fails_the_downstream_authentication() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let token = issue_with(&tokens, &upstream().await, b"not-the-secret");
     let addr = broker(tokens).await;
     assert!(downstream(&addr, token.as_bytes()).await.is_none());
@@ -440,7 +449,7 @@ async fn an_upstream_that_refuses_the_credential_fails_the_downstream_authentica
 
 #[tokio::test]
 async fn a_token_presented_by_another_user_is_refused() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let token = issue(&tokens, &upstream().await);
     let addr = broker(tokens).await;
     assert!(
@@ -546,7 +555,7 @@ fn count(seen: &Seen, kind: &[u8]) -> usize {
 
 #[tokio::test]
 async fn a_token_without_file_transfer_refuses_sftp_and_scp_and_keeps_the_shell() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let (up, seen) = upstream_seeing().await;
     let token = issue_without_file_transfer(&tokens, &up);
     let addr = broker(tokens).await;
@@ -580,7 +589,7 @@ async fn a_token_without_file_transfer_refuses_sftp_and_scp_and_keeps_the_shell(
 
 #[tokio::test]
 async fn what_only_looks_like_a_file_transfer_crosses_a_token_without_it() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let token = issue_without_file_transfer(&tokens, &upstream().await);
     let addr = broker(tokens).await;
     let mut s = downstream(&addr, token.as_bytes()).await.expect("refused");
@@ -604,7 +613,7 @@ async fn what_only_looks_like_a_file_transfer_crosses_a_token_without_it() {
 
 #[tokio::test]
 async fn a_token_with_file_transfer_allows_sftp_beside_the_shell_and_scp() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let token = issue(&tokens, &upstream().await);
     let addr = broker(tokens).await;
     let mut s = downstream(&addr, token.as_bytes()).await.expect("refused");
@@ -621,7 +630,7 @@ async fn a_token_with_file_transfer_allows_sftp_beside_the_shell_and_scp() {
 
 #[tokio::test]
 async fn one_shell_per_token_across_its_connections_given_back_when_it_ends() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let (up, seen) = upstream_seeing().await;
     let token = issue(&tokens, &up);
     let addr = broker(tokens).await;
@@ -646,7 +655,7 @@ async fn one_shell_per_token_across_its_connections_given_back_when_it_ends() {
 
 #[tokio::test]
 async fn a_shell_is_given_back_when_its_connection_drops() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let token = issue(&tokens, &upstream().await);
     let addr = broker(tokens).await;
     timeout(LIMIT, async {
@@ -669,7 +678,7 @@ async fn a_shell_is_given_back_when_its_connection_drops() {
 
 #[tokio::test]
 async fn a_second_shell_request_on_the_channel_holding_the_shell_crosses() {
-    let tokens = Tokens::default();
+    let tokens = tokens();
     let (up, seen) = upstream_seeing().await;
     let token = issue(&tokens, &up);
     let addr = broker(tokens).await;
@@ -682,4 +691,39 @@ async fn a_second_shell_request_on_the_channel_holding_the_shell_crosses() {
     .await
     .expect("timed out");
     assert_eq!(count(&seen, b"shell"), 2);
+}
+
+#[tokio::test]
+async fn a_disposed_token_ends_its_upstream_and_refuses_new_channels() {
+    let tokens = tokens();
+    let token = issue(&tokens, &upstream().await);
+    let addr = broker(tokens.clone()).await;
+    let mut s = downstream(&addr, token.as_bytes()).await.expect("refused");
+    timeout(LIMIT, async {
+        let shell = open(&mut s).await;
+        assert!(ask(&mut s, shell, "shell", Vec::new()).await);
+        assert!(tokens.revoke(&token));
+        s.eof(shell).await.unwrap();
+        closed(&mut s, shell).await;
+        s.open_channel("session", Vec::new()).await.unwrap();
+        loop {
+            match s.next().await.unwrap() {
+                Some(Action::ChannelOpenFailed {
+                    reason,
+                    description,
+                    ..
+                }) => {
+                    assert_eq!(reason, OpenFailureReason::CONNECT_FAILED);
+                    assert_eq!(description, b"upstream channel open failed");
+                    break;
+                }
+                Some(Action::ChannelOpened { .. }) => panic!("a channel opened after disposal"),
+                Some(Action::Closed(c)) => panic!("{c:?}"),
+                None => panic!("ended"),
+                Some(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("timed out");
 }

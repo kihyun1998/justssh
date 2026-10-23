@@ -4,12 +4,14 @@
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use justssh::HostKey;
 use justssh_broker::broker;
 use justssh_broker::hostkey;
 use justssh_broker::issue::require_loopback;
+use justssh_broker::peer;
 use justssh_broker::session::Session;
 use justssh_broker::tokens::Tokens;
 
@@ -142,6 +144,13 @@ fn main() -> ExitCode {
 fn run(options: Options) -> Result<(), String> {
     let mut session = Session::new(std::io::stdin().lock(), std::io::stdout().lock());
     session.handshake().map_err(|e| format!("{e:?}"))?;
+    let config = match peer::config() {
+        Ok(config) => config,
+        Err(e) => {
+            let _ = session.fail("session unavailable");
+            return Err(e);
+        }
+    };
 
     let path = options
         .host_key
@@ -171,8 +180,8 @@ fn run(options: Options) -> Result<(), String> {
         .announce(&bound.to_string(), &key.private_key().plain_public_blob())
         .map_err(|e| format!("{e:?}"))?;
 
-    let tokens = Tokens::default();
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let tokens = Tokens::new(config, runtime.handle().clone());
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let listener = {
         let _entered = runtime.enter();
@@ -184,6 +193,7 @@ fn run(options: Options) -> Result<(), String> {
         host_key,
         tokens.clone(),
         options.dial_timeout,
+        Arc::new(peer::probe),
     ));
     let served = session.serve(&tokens).map_err(|e| format!("{e:?}"));
     runtime.shutdown_background();

@@ -2,8 +2,11 @@
 //! pipe, and the SSH it terminates through justssh. Not published.
 
 pub mod broker;
+pub mod caller;
 pub mod handoff;
 pub mod hostkey;
 pub mod issue;
+pub mod peer;
+pub mod rule;
 pub mod session;
 pub mod tokens;
