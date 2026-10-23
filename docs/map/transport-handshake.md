@@ -30,7 +30,7 @@ The identification line and every line before it count against 255 bytes togethe
 
 ## The table decides, dispatch also refuses
 
-`allowed::verdict` is where a message is accepted or refused. `Transport::dispatch` also refuses any accepted message it has no handler for, so a wrong `Accept` in the table still closes the connection. A test that only checks that the connection closed — `userauth_success_sent_to_a_server_closes_the_connection` — therefore stays green when the table alone is wrong (measured on #3); the table itself is what the fuzz target (#14) is for.
+`allowed::verdict` is where a message is accepted or refused. `Transport::dispatch` also refuses any accepted message it has no handler for, so a wrong `Accept` in the table still closes the connection. A test that only checks that the connection closed — `userauth_success_sent_to_a_server_closes_the_connection` — therefore stays green when the table alone is wrong (measured on #3). The table itself is checked cell by cell by `every_cell_of_the_table_is_what_the_rfcs_and_adr_0002_say` (`allowed.rs`), against a second table written from the RFCs and ADR-0002 as one list per stage; the fuzz target checks the behaviour around it (`fuzzing.md`).
 
 ## Unknown means no decoder in justssh-wire
 

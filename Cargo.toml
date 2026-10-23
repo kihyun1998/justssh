@@ -8,7 +8,7 @@ members = [
     "crates/justssh-keys",
     "crates/justssh-broker",
 ]
-exclude = ["ci/coexist"]
+exclude = ["ci/coexist", "fuzz"]
 
 [workspace.package]
 edition = "2024"

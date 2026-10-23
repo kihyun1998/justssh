@@ -1,0 +1,36 @@
+# The libFuzzer targets (cargo-fuzz), outside the workspace so that their nightly build never
+# touches the ordinary one. `src/lib.rs` holds what each target checks; the workspace's
+# `crates/justssh/tests/fuzz_regressions.rs` replays `regressions/` through it on stable.
+[package]
+name = "justssh-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+justssh = { path = "../crates/justssh", features = ["test-support"] }
+justssh-wire = { path = "../crates/justssh-wire" }
+rand_core = "0.10"
+
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport"
+path = "fuzz_targets/transport.rs"
+test = false
+doc = false
+bench = false

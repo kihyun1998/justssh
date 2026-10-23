@@ -5,3 +5,5 @@
 crates/justssh-keys/tests/keys/* -text
 crates/justssh-keys/tests/ppk/* -text
 crates/justssh-keys/tests/pem/* -text
+# Fuzz inputs are bytes, kept as they are.
+fuzz/regressions/** binary
