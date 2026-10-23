@@ -67,3 +67,83 @@ pub(crate) fn verdict(role: Role, stage: Stage, n: u8, strict_initial: bool) -> 
         _ => Disconnect,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Role, Stage, Verdict, verdict};
+
+    /// The numbers each side takes in each stage, written from RFC 4253, 4252 and 4254 and
+    /// ADR-0002 as one list per stage rather than one rule per number.
+    fn allowed(role: Role, stage: Stage) -> Vec<u8> {
+        let mut n = vec![1, 2, 3, 4];
+        let channel_protocol: Vec<u8> = [80, 81, 82]
+            .into_iter()
+            .chain(90..=100)
+            .chain([192, 193])
+            .collect();
+        n.extend(match (role, stage) {
+            (_, Stage::KexInit) => vec![20],
+            (Role::Server, Stage::KexEcdh) => vec![30],
+            (Role::Client, Stage::KexEcdh) => vec![31],
+            (_, Stage::NewKeys) => vec![21],
+            (Role::Server, Stage::Service) => vec![5, 20],
+            (Role::Client, Stage::Service) => vec![6, 7, 20],
+            (Role::Server, Stage::Auth) => vec![20, 50],
+            (Role::Client, Stage::Auth) => vec![7, 20, 51, 52, 53, 60],
+            (_, Stage::Connected) => [vec![20], channel_protocol].concat(),
+        });
+        n
+    }
+
+    /// The numbers counted as known: every number the wire crate decodes, and 60, which a
+    /// client reads during keyboard-interactive authentication, at either side.
+    fn known(n: u8) -> bool {
+        matches!(n, 1..=7 | 20 | 21 | 30 | 31 | 50..=53 | 60 | 80..=82 | 90..=100 | 192 | 193)
+    }
+
+    fn expected(role: Role, stage: Stage, n: u8, strict_initial: bool) -> Verdict {
+        if strict_initial && matches!(n, 2..=4) {
+            return Verdict::Disconnect;
+        }
+        if role == Role::Server && stage == Stage::Connected && n == 50 {
+            return Verdict::Ignore;
+        }
+        if allowed(role, stage).contains(&n) {
+            return Verdict::Accept;
+        }
+        if stage == Stage::Connected && !known(n) {
+            return Verdict::Unimplemented;
+        }
+        Verdict::Disconnect
+    }
+
+    #[test]
+    fn every_cell_of_the_table_is_what_the_rfcs_and_adr_0002_say() {
+        let mut differ = Vec::new();
+        for role in [Role::Server, Role::Client] {
+            for stage in [
+                Stage::KexInit,
+                Stage::KexEcdh,
+                Stage::NewKeys,
+                Stage::Service,
+                Stage::Auth,
+                Stage::Connected,
+            ] {
+                for n in 0..=u8::MAX {
+                    for strict in [false, true] {
+                        let (got, want) = (
+                            verdict(role, stage, n, strict),
+                            expected(role, stage, n, strict),
+                        );
+                        if got != want {
+                            differ.push(format!(
+                                "{role:?} {stage:?} {n} strict={strict}: {got:?}, want {want:?}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(differ.is_empty(), "{}", differ.join("\n"));
+    }
+}
