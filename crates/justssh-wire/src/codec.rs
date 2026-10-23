@@ -118,6 +118,11 @@ impl Writer {
         Writer::default()
     }
 
+    /// A writer appending to `buf`.
+    pub(crate) fn appending(buf: Vec<u8>) -> Self {
+        Writer { buf }
+    }
+
     /// The bytes written so far.
     pub fn into_bytes(self) -> Vec<u8> {
         self.buf

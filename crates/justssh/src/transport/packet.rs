@@ -19,6 +19,10 @@ pub(crate) const MAX_PACKET: usize = 256 * 1024;
 /// Longest MAC or tag after a packet: hmac-sha2-512's.
 pub(crate) const MAX_MAC: usize = 64;
 const TAG: usize = 16;
+/// `packet_length` and `padding_length`: the bytes before a packet's payload.
+pub(crate) const HEADER: usize = 5;
+/// Room enough after a payload for any padding and MAC or tag.
+pub(crate) const TRAILER: usize = 2 * 16 + MAX_MAC;
 
 /// The key pair of chacha20-poly1305@openssh.com: `main` (K_1) encrypts the packet,
 /// `header` (K_2) the length field.
@@ -282,9 +286,10 @@ pub(crate) enum OpenError {
     Mac,
 }
 
-/// A received packet's payload and how many buffered bytes it used.
+/// Where a received packet's payload lies in the buffer it was opened in, decrypted there, and
+/// how many buffered bytes the packet used.
 pub(crate) struct Opened {
-    pub payload: Zeroizing<Vec<u8>>,
+    pub payload: std::ops::Range<usize>,
     pub used: usize,
 }
 
@@ -296,13 +301,14 @@ fn padding(aligned: usize, block: usize) -> usize {
     pad
 }
 
-/// The payload inside `packet_length` bytes of decrypted `padding_length || payload || padding`.
-fn unpad(body: &[u8]) -> Result<Zeroizing<Vec<u8>>, OpenError> {
-    let pad = usize::from(body[0]);
-    if pad < 4 || pad + 1 >= body.len() {
+/// Where the payload lies in the decrypted `padding_length || payload || padding` of a packet
+/// whose body starts at `start` and is `len` bytes long.
+fn unpad(buf: &[u8], start: usize, len: usize) -> Result<std::ops::Range<usize>, OpenError> {
+    let pad = usize::from(buf[start]);
+    if pad < 4 || pad + 1 >= len {
         return Err(OpenError::Malformed);
     }
-    Ok(Zeroizing::new(body[1..body.len() - pad].to_vec()))
+    Ok(start + 1..start + len - pad)
 }
 
 /// A `packet_length` that is in range and whose packet aligns to `block`, counting the length
@@ -313,8 +319,9 @@ fn length_ok(len: usize, block: usize, with_length: bool) -> bool {
 }
 
 impl Cipher {
-    /// Takes one packet from the front of `buf`, or `None` until it is all there.
-    pub(crate) fn open(&mut self, buf: &[u8], seq: u32) -> Result<Option<Opened>, OpenError> {
+    /// Takes one packet from the front of `buf`, decrypting it there, or `None` until it is all
+    /// there; nothing in `buf` changes before the whole packet has arrived.
+    pub(crate) fn open(&mut self, buf: &mut [u8], seq: u32) -> Result<Option<Opened>, OpenError> {
         if buf.len() < 4 {
             return Ok(None);
         }
@@ -329,7 +336,7 @@ impl Cipher {
                     return Ok(None);
                 }
                 Ok(Some(Opened {
-                    payload: unpad(&buf[4..4 + len])?,
+                    payload: unpad(buf, 4, len)?,
                     used: 4 + len,
                 }))
             }
@@ -347,10 +354,9 @@ impl Cipher {
                 if !bool::from(expected.ct_eq(&buf[4 + len..4 + len + TAG])) {
                     return Err(OpenError::Mac);
                 }
-                let mut body = Zeroizing::new(buf[4..4 + len].to_vec());
-                ChaChaKeys::stream(&keys.main, seq, 1).apply_keystream(&mut body);
+                ChaChaKeys::stream(&keys.main, seq, 1).apply_keystream(&mut buf[4..4 + len]);
                 Ok(Some(Opened {
-                    payload: unpad(&body)?,
+                    payload: unpad(buf, 4, len)?,
                     used: 4 + len + TAG,
                 }))
             }
@@ -362,12 +368,13 @@ impl Cipher {
                 if buf.len() < 4 + len + TAG {
                     return Ok(None);
                 }
-                let mut body = Zeroizing::new(buf[4..4 + len].to_vec());
-                if !gcm.open(&buf[..4], &mut body, &buf[4 + len..4 + len + TAG]) {
+                let (head, rest) = buf.split_at_mut(4);
+                let (body, tag) = rest.split_at_mut(len);
+                if !gcm.open(head, body, &tag[..TAG]) {
                     return Err(OpenError::Mac);
                 }
                 Ok(Some(Opened {
-                    payload: unpad(&body)?,
+                    payload: unpad(buf, 4, len)?,
                     used: 4 + len + TAG,
                 }))
             }
@@ -386,10 +393,9 @@ impl Cipher {
                 {
                     return Err(OpenError::Mac);
                 }
-                let mut body = Zeroizing::new(buf[4..4 + len].to_vec());
-                ctr.stream.apply(&mut body);
+                ctr.stream.apply(&mut buf[4..4 + len]);
                 Ok(Some(Opened {
-                    payload: unpad(&body)?,
+                    payload: unpad(buf, 4, len)?,
                     used: 4 + len + mac_len,
                 }))
             }
@@ -408,32 +414,34 @@ impl Cipher {
                 if buf.len() < 4 + len + mac_len {
                     return Ok(None);
                 }
-                let mut packet = Zeroizing::new(buf[..4 + len].to_vec());
-                ctr.stream.apply(&mut packet);
-                if !ctr
-                    .mac
-                    .verify(seq, &packet, &buf[4 + len..4 + len + mac_len])
-                {
+                let (packet, mac) = buf.split_at_mut(4 + len);
+                ctr.stream.apply(packet);
+                if !ctr.mac.verify(seq, packet, &mac[..mac_len]) {
                     return Err(OpenError::Mac);
                 }
                 Ok(Some(Opened {
-                    payload: unpad(&packet[4..])?,
+                    payload: unpad(buf, 4, len)?,
                     used: 4 + len + mac_len,
                 }))
             }
         }
     }
 
-    /// `payload` framed, padded with random bytes and protected for sequence number `seq`.
-    pub(crate) fn seal(&mut self, payload: &[u8], seq: u32, rng: &mut dyn CryptoRng) -> Vec<u8> {
+    /// `p`, a payload after [`HEADER`] bytes left for the frame, framed, padded with random bytes
+    /// and protected for sequence number `seq`, in place.
+    pub(crate) fn seal_framed(
+        &mut self,
+        mut p: Vec<u8>,
+        seq: u32,
+        rng: &mut dyn CryptoRng,
+    ) -> Vec<u8> {
+        let payload_len = p.len() - HEADER;
         let (block, with_length) = self.alignment();
-        let framed = 1 + payload.len() + if with_length { 4 } else { 0 };
+        let framed = 1 + payload_len + if with_length { 4 } else { 0 };
         let pad = padding(framed, block);
-        let len = u32::try_from(1 + payload.len() + pad).expect("packet longer than u32::MAX");
-        let mut p = Vec::with_capacity(4 + len as usize + 64);
-        p.extend_from_slice(&len.to_be_bytes());
-        p.push(pad as u8);
-        p.extend_from_slice(payload);
+        let len = u32::try_from(1 + payload_len + pad).expect("packet longer than u32::MAX");
+        p[..4].copy_from_slice(&len.to_be_bytes());
+        p[4] = pad as u8;
         let start = p.len();
         p.resize(start + pad, 0);
         rng.fill_bytes(&mut p[start..]);
