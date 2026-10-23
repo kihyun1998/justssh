@@ -4,15 +4,17 @@ mod connect;
 
 pub use connect::{AuthMethod, ClientHandler, Connected, connect};
 
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::io;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Duration;
 
 use justssh::{
     Action, ChannelId, Closed, Endpoint, Event, GlobalReplyToken, OpenFailureReason,
     PasswordRequest, Phase, ReplyToken, RequestToken, Server,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::time::{Instant, timeout_at};
 
 /// How long a connection may take to get past each phase, counted from the start of
@@ -195,6 +197,8 @@ pub struct Session<IO, E = Server> {
     out: Vec<u8>,
     written: usize,
     events: std::collections::VecDeque<Action>,
+    /// The peer closed the stream while output was being written.
+    read_closed: bool,
 }
 
 impl<IO, E> Session<IO, E>
@@ -212,6 +216,7 @@ where
             out: Vec::new(),
             written: 0,
             events: events.into(),
+            read_closed: false,
         }
     }
 
@@ -242,6 +247,9 @@ where
             }
             if self.endpoint.phase() == Phase::Closed {
                 return Ok(None);
+            }
+            if self.read_closed {
+                return Err(io::ErrorKind::UnexpectedEof.into());
             }
             let n = self.io.read(&mut self.buf).await?;
             if n == 0 {
@@ -321,6 +329,9 @@ where
                 .channel_info(channel)
                 .is_some_and(|info| info.queued() > 0)
         {
+            if self.read_closed {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
             let n = self.io.read(&mut self.buf).await?;
             if n == 0 {
                 return Err(io::ErrorKind::UnexpectedEof.into());
@@ -447,17 +458,49 @@ where
         }
     }
 
-    /// Writes what is queued, one `write` at a time, remembering how far it got.
+    /// Writes what is queued, one `write` at a time, remembering how far it got, then flushes.
+    /// While a write or the flush waits, reads, and hands what arrives to the endpoint: its
+    /// output joins the queue and the rest is kept for [`next`](Session::next).
     async fn flush(&mut self) -> io::Result<()> {
-        while self.written < self.out.len() {
-            let n = self.io.write(&self.out[self.written..]).await?;
-            if n == 0 {
-                return Err(io::ErrorKind::WriteZero.into());
-            }
-            self.written += n;
+        enum Step {
+            Wrote(usize),
+            Flushed,
+            Read(usize),
         }
-        self.out.clear();
-        self.written = 0;
-        self.io.flush().await
+        loop {
+            let reading = !self.read_closed && self.endpoint.phase() != Phase::Closed;
+            let (io, buf) = (&mut self.io, &mut self.buf);
+            let rest = &self.out[self.written..];
+            let step = poll_fn(|cx| {
+                let wrote = if rest.is_empty() {
+                    Pin::new(&mut *io).poll_flush(cx).map_ok(|()| Step::Flushed)
+                } else {
+                    Pin::new(&mut *io).poll_write(cx, rest).map_ok(Step::Wrote)
+                };
+                if wrote.is_ready() || !reading {
+                    return wrote;
+                }
+                let mut read = ReadBuf::new(buf);
+                match Pin::new(&mut *io).poll_read(cx, &mut read) {
+                    Poll::Ready(r) => Poll::Ready(r.map(|()| Step::Read(read.filled().len()))),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await?;
+            match step {
+                Step::Wrote(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Step::Wrote(n) => self.written += n,
+                Step::Flushed => {
+                    self.out.clear();
+                    self.written = 0;
+                    return Ok(());
+                }
+                Step::Read(0) => self.read_closed = true,
+                Step::Read(n) => {
+                    let actions = self.endpoint.process(Event::Received(&self.buf[..n]));
+                    self.absorb(actions);
+                }
+            }
+        }
     }
 }
