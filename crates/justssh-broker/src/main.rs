@@ -4,17 +4,33 @@
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
+use justssh::HostKey;
+use justssh_broker::broker;
 use justssh_broker::hostkey;
 use justssh_broker::issue::require_loopback;
-use justssh_broker::session::{Session, Tokens};
+use justssh_broker::session::Session;
+use justssh_broker::tokens::Tokens;
 
 /// acwbroker's flags that this broker acts on; the others are read and ignored.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Options {
     listen: Option<String>,
     host_key: Option<PathBuf>,
+    dial_timeout: Duration,
     version: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            listen: None,
+            host_key: None,
+            dial_timeout: Duration::from_secs(15),
+            version: false,
+        }
+    }
 }
 
 /// Reads flags as Go's `flag` package does: `-name value`, `-name=value` or with two dashes,
@@ -63,10 +79,43 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
         match name {
             "listen" => options.listen = Some(value),
             "host-key" => options.host_key = Some(PathBuf::from(value)),
+            "dial-timeout" => {
+                options.dial_timeout = duration(&value)
+                    .ok_or_else(|| format!("invalid value {value:?} for flag -dial-timeout"))?;
+            }
             _ => {}
         }
     }
     Ok(options)
+}
+
+/// A duration as Go's `time.ParseDuration` writes one, such as `15s`, `1m30s` or `500ms`.
+fn duration(text: &str) -> Option<Duration> {
+    let mut rest = text;
+    let mut total = Duration::ZERO;
+    if rest == "0" {
+        return Some(total);
+    }
+    while !rest.is_empty() {
+        let digits = rest.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+        let (number, after) = rest.split_at(digits);
+        let unit_len = after
+            .find(|c: char| c.is_ascii_digit())
+            .unwrap_or(after.len());
+        let (unit, after) = after.split_at(unit_len);
+        let seconds = match unit {
+            "ns" => 1e-9,
+            "us" | "µs" => 1e-6,
+            "ms" => 1e-3,
+            "s" => 1.0,
+            "m" => 60.0,
+            "h" => 3600.0,
+            _ => return None,
+        };
+        total += Duration::try_from_secs_f64(number.parse::<f64>().ok()? * seconds).ok()?;
+        rest = after;
+    }
+    Some(total)
 }
 
 fn main() -> ExitCode {
@@ -122,6 +171,21 @@ fn run(options: Options) -> Result<(), String> {
         .announce(&bound.to_string(), &key.private_key().plain_public_blob())
         .map_err(|e| format!("{e:?}"))?;
 
-    let mut tokens = Tokens::default();
-    session.serve(&mut tokens).map_err(|e| format!("{e:?}"))
+    let tokens = Tokens::default();
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let listener = {
+        let _entered = runtime.enter();
+        tokio::net::TcpListener::from_std(listener).map_err(|e| e.to_string())?
+    };
+    let host_key = HostKey::new(key.private_key().clone());
+    runtime.spawn(broker::serve(
+        listener,
+        host_key,
+        tokens.clone(),
+        options.dial_timeout,
+    ));
+    let served = session.serve(&tokens).map_err(|e| format!("{e:?}"));
+    runtime.shutdown_background();
+    served
 }
