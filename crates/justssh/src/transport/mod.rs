@@ -12,7 +12,7 @@ use justssh_wire::{
     Disconnect, ExtInfo, KexEcdhInit, KexEcdhReply, KexInit, Message, NewKeys, Pong, ServiceAccept,
     ServiceRequest, Unimplemented, UserauthFailure, UserauthSuccess, number,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::{BoxRng, HostKey};
 use crate::connection::{ChannelId, ChannelInfo, Channels, Step};
@@ -127,7 +127,9 @@ pub(crate) struct Transport {
     stage: Stage,
     version_done: bool,
     version_budget: usize,
-    inbuf: Vec<u8>,
+    inbuf: Zeroizing<Vec<u8>>,
+    /// How much of the front of `inbuf` has been handled and zeroed.
+    inbuf_head: usize,
     handshake: Handshake,
     in_seq: u32,
     out_seq: u32,
@@ -194,7 +196,8 @@ impl Transport {
             stage: Stage::KexInit,
             version_done: false,
             version_budget: version::MAX_TOTAL,
-            inbuf: Vec::new(),
+            inbuf: Zeroizing::new(Vec::new()),
+            inbuf_head: 0,
             handshake: Handshake {
                 local_version,
                 peer_version: None,
@@ -240,6 +243,16 @@ impl Transport {
     pub(crate) fn send_raw(&mut self, payload: &[u8]) -> Vec<Action> {
         self.seal_and_write(payload);
         std::mem::take(&mut self.actions)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn input_capacity(&self) -> usize {
+        self.inbuf.capacity()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn input_held(&self) -> &[u8] {
+        &self.inbuf
     }
 
     /// After the first key exchange, hands every received payload over as
@@ -302,8 +315,12 @@ impl Transport {
                 self.write(line.into_bytes());
             }
             Event::Received(bytes) if self.started => {
+                if self.inbuf_head > 0 && self.inbuf.capacity() - self.inbuf.len() < bytes.len() {
+                    self.inbuf.drain(..self.inbuf_head);
+                    self.inbuf_head = 0;
+                }
                 self.inbuf.extend_from_slice(bytes);
-                if self.waiting() && self.inbuf.len() > PENDING_INPUT {
+                if self.waiting() && self.inbuf.len() - self.inbuf_head > PENDING_INPUT {
                     self.fail(DisconnectReason::PROTOCOL_ERROR, Error::InputOverflow);
                 } else {
                     self.drain();
@@ -496,27 +513,45 @@ impl Transport {
         self.actions.push(Action::Write(bytes));
     }
 
+    /// Encodes `message` into a packet buffer, after the room its frame takes, and sends it.
     fn send(&mut self, message: &Message) {
-        self.send_payload(&message.encode());
+        let hint = match message {
+            Message::ChannelData(m) => 9 + m.data.len(),
+            Message::ChannelExtendedData(m) => 13 + m.data.len(),
+            _ => 0,
+        };
+        let mut packet = Vec::with_capacity(packet::HEADER + hint + packet::TRAILER);
+        packet.resize(packet::HEADER, 0);
+        message.encode_into(&mut packet);
+        self.send_framed(packet);
     }
 
-    /// Sends `payload`, or holds it until the exchange under way ends when RFC 4253 §7.1 does
-    /// not allow it during one: anything but messages 1 to 4, `SSH_MSG_EXT_INFO` and 20 to 49.
     fn send_payload(&mut self, payload: &[u8]) {
-        if self.kexinit_sent && !matches!(payload[0], 1..=4 | 7 | 20..=49) {
+        self.send_framed(framed(payload));
+    }
+
+    /// Sends the payload after [`packet::HEADER`] bytes of `packet`, or holds it until the
+    /// exchange under way ends when RFC 4253 §7.1 does not allow it during one: anything but
+    /// messages 1 to 4, `SSH_MSG_EXT_INFO` and 20 to 49.
+    fn send_framed(&mut self, packet: Vec<u8>) {
+        if self.kexinit_sent && !matches!(packet[packet::HEADER], 1..=4 | 7 | 20..=49) {
             if self.held.len() >= MAX_HELD {
                 return self.fail(DisconnectReason::PROTOCOL_ERROR, Error::ExchangeBacklog);
             }
-            self.held.push(payload.to_vec());
+            self.held.push(packet[packet::HEADER..].to_vec());
             return;
         }
-        self.seal_and_write(payload);
+        self.seal_and_write_framed(packet);
         if self.out_bytes > self.rekey_bytes(false) || self.out_since_keys >= REKEY_PACKETS {
             self.start_rekey();
         }
     }
 
     fn seal_and_write(&mut self, payload: &[u8]) {
+        self.seal_and_write_framed(framed(payload));
+    }
+
+    fn seal_and_write_framed(&mut self, packet: Vec<u8>) {
         if self.out_since_keys > u64::from(u32::MAX) {
             if self.phase != Phase::Closed {
                 self.close(Closed::Local {
@@ -527,10 +562,13 @@ impl Transport {
             }
             return;
         }
-        let packet = self.sealing.seal(payload, self.out_seq, &mut *self.rng);
+        let payload_len = packet.len() - packet::HEADER;
+        let packet = self
+            .sealing
+            .seal_framed(packet, self.out_seq, &mut *self.rng);
         self.out_seq = self.out_seq.wrapping_add(1);
         self.out_since_keys += 1;
-        self.out_bytes += payload.len() as u64;
+        self.out_bytes += payload_len as u64;
         self.write(packet);
     }
 
@@ -560,17 +598,27 @@ impl Transport {
         });
     }
 
+    /// Handles what `inbuf` holds complete, zeroes it, and keeps the rest; the rest moves to the
+    /// front only when `Event::Received` finds no room behind it.
     fn drain(&mut self) {
-        let mut consumed = 0;
-        self.drain_from(&mut consumed);
-        self.inbuf.drain(..consumed);
+        let mut inbuf = std::mem::take(&mut self.inbuf);
+        let mut consumed = self.inbuf_head;
+        self.drain_from(&mut inbuf, &mut consumed);
+        inbuf[self.inbuf_head..consumed].zeroize();
+        if consumed == inbuf.len() {
+            inbuf.clear();
+            self.inbuf_head = 0;
+        } else {
+            self.inbuf_head = consumed;
+        }
+        self.inbuf = inbuf;
     }
 
     /// Handles everything complete in `inbuf[*consumed..]`, advancing `consumed` past it.
-    fn drain_from(&mut self, consumed: &mut usize) {
+    fn drain_from(&mut self, inbuf: &mut Vec<u8>, consumed: &mut usize) {
         while self.phase != Phase::Closed && !self.waiting() {
             if !self.version_done {
-                match version::take_line(&mut self.inbuf, &mut self.version_budget) {
+                match version::take_line(inbuf, &mut self.version_budget) {
                     Ok(Line::Incomplete) => return,
                     Ok(Line::Other) => continue,
                     Ok(Line::Version(v)) => self.on_version(v),
@@ -584,7 +632,8 @@ impl Transport {
                 }
                 continue;
             }
-            let opened = match self.opening.open(&self.inbuf[*consumed..], self.in_seq) {
+            let start = *consumed;
+            let opened = match self.opening.open(&mut inbuf[start..], self.in_seq) {
                 Ok(Some(opened)) => opened,
                 Ok(None) => return,
                 Err(OpenError::Malformed) => {
@@ -605,8 +654,9 @@ impl Transport {
             self.in_seq = seq.wrapping_add(1);
             let first = self.packets_received == 0;
             self.packets_received += 1;
-            self.in_bytes += opened.payload.len() as u64;
-            self.dispatch(&opened.payload, seq, first);
+            let payload = &inbuf[start + opened.payload.start..start + opened.payload.end];
+            self.in_bytes += payload.len() as u64;
+            self.dispatch(payload, seq, first);
             if self.in_bytes > self.rekey_bytes(true) || self.in_since_keys >= REKEY_PACKETS {
                 self.start_rekey();
             }
@@ -1276,4 +1326,12 @@ impl Transport {
         self.stage = Stage::Auth;
         self.phase = Phase::Auth;
     }
+}
+
+/// `payload` after [`packet::HEADER`] bytes left for its frame, with room for the rest.
+fn framed(payload: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(packet::HEADER + payload.len() + packet::TRAILER);
+    packet.resize(packet::HEADER, 0);
+    packet.extend_from_slice(payload);
+    packet
 }

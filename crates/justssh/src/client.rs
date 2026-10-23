@@ -42,6 +42,18 @@ impl Client {
         self.transport.set_raw_receive(raw);
     }
 
+    /// How many bytes the buffer of received, not yet handled input holds room for. For tests.
+    #[cfg(feature = "test-support")]
+    pub fn input_capacity(&self) -> usize {
+        self.transport.input_capacity()
+    }
+
+    /// The bytes the buffer of received input holds, handled ones included. For tests.
+    #[cfg(feature = "test-support")]
+    pub fn input_held(&self) -> &[u8] {
+        self.transport.input_held()
+    }
+
     pub fn process(&mut self, event: Event<'_>) -> Vec<Action> {
         self.transport.process(event)
     }

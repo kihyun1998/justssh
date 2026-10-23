@@ -202,7 +202,14 @@ pub enum Message {
 impl Message {
     /// The payload: message number followed by the fields.
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::new();
+        let mut out = Vec::new();
+        self.encode_into(&mut out);
+        out
+    }
+
+    /// Appends the payload to `out`.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        let mut w = Writer::appending(core::mem::take(out));
         match self {
             Message::KexInit(m) => {
                 w.u8(number::KEXINIT)
@@ -362,7 +369,7 @@ impl Message {
                 w.u8(*n);
             }
         }
-        w.into_bytes()
+        *out = w.into_bytes();
     }
 
     /// Decodes a whole payload. Every field must be present and no byte may be left over,
