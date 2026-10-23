@@ -10,13 +10,13 @@ use std::time::{Duration, SystemTime};
 
 use justssh::Zeroizing;
 use justssh_broker::caller::{
-    Caller, MAX_DEPTH, Owner, ProcessInfo, ProcessKey, ProcessTable, Stop, walk,
+    Caller, MAX_DEPTH, Owner, ProcessImage, ProcessInfo, ProcessKey, ProcessTable, Stop, walk,
 };
 use justssh_broker::issue::{self, Issue, Rule};
 use justssh_broker::rule::{ImageMetadata, admits};
 use justssh_broker::tokens::{
-    Admission, Config, DEFAULT_ADMIT, DEFAULT_GRACE, DEFAULT_WINDOW, Grant, Held, Hold, Refusal,
-    Tokens,
+    Admission, AttachError, Config, DEFAULT_ADMIT, DEFAULT_GRACE, DEFAULT_WINDOW, Grant, Held,
+    Hold, Refusal, Tokens,
 };
 use tokio::sync::oneshot;
 use tokio::time::{Instant, advance, timeout};
@@ -170,16 +170,19 @@ impl Bench {
         }
     }
 
-    /// Tokens whose timers never run, as acwbroker's tests drive its clock without them.
-    fn without_timers() -> Self {
+    /// Tokens whose timers run on the real clock, so not within a test, as acwbroker's tests
+    /// drive its clock without its timers. What they tell runs at once.
+    fn without_timers(f: impl FnOnce(&mut Config)) -> Self {
         let idle: &'static tokio::runtime::Runtime = Box::leak(Box::new(
-            tokio::runtime::Builder::new_current_thread()
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
                 .enable_time()
                 .build()
                 .unwrap(),
         ));
         let mut config = Config::default();
         config.app = APP;
+        f(&mut config);
         Bench {
             tokens: Tokens::new(config, idle.handle().clone()),
             start: Instant::now(),
@@ -323,7 +326,7 @@ async fn an_out_of_tree_caller_pins_only_itself() {
 
 #[tokio::test(start_paused = true)]
 async fn a_token_presented_after_its_window_expires() {
-    let b = Bench::without_timers();
+    let b = Bench::without_timers(|_| {});
     let t = b.issue();
     b.at(DEFAULT_WINDOW + Duration::from_secs(1)).await;
     assert_eq!(b.refuse(&t, &in_tree(&[WINSCP])), Refusal::TokenExpired);
@@ -1425,4 +1428,478 @@ fn the_lineage_carries_each_links_start_time_and_stops_at_a_recycled_parent() {
         c.lineage,
         [ProcessKey::new(400, at(3)), ProcessKey::new(300, at(2))]
     );
+}
+
+// attach_test.go, claimed_test.go, freeze_test.go, launched_test.go, unclaimed_test.go
+
+const SESSION_FILE: &str = r"C:\Users\u\AppData\Local\ACRA\cache\5f1c";
+const OTHER_FILE: &str = r"C:\Users\u\AppData\Local\ACRA\cache\9a0e";
+const LAUNCHER: u32 = 4242;
+const WINDOW: u32 = 5804;
+const NEWER: u32 = 32988;
+
+/// What the tokens told and shredded, in order.
+#[derive(Default)]
+struct Told {
+    claimed: Mutex<Vec<u32>>,
+    unclaimed: Mutex<Vec<u32>>,
+    shredded: Mutex<Vec<String>>,
+}
+
+impl Told {
+    fn claimed(&self) -> Vec<u32> {
+        std::mem::take(&mut self.claimed.lock().unwrap())
+    }
+
+    fn unclaimed(&self) -> Vec<u32> {
+        std::mem::take(&mut self.unclaimed.lock().unwrap())
+    }
+
+    fn shredded(&self) -> Vec<String> {
+        std::mem::take(&mut self.shredded.lock().unwrap())
+    }
+}
+
+/// The processes of this session, as the test sets them.
+struct Processes(Mutex<Result<Vec<ProcessImage>, String>>);
+
+impl Default for Processes {
+    fn default() -> Self {
+        Processes(Mutex::new(Ok(Vec::new())))
+    }
+}
+
+impl Processes {
+    fn set(&self, list: Vec<ProcessImage>) {
+        *self.0.lock().unwrap() = Ok(list);
+    }
+
+    fn fail(&self) {
+        *self.0.lock().unwrap() = Err("snapshot failed".to_owned());
+    }
+}
+
+/// Tokens that report to `told`, watch with `hold` and list `processes`.
+fn reporting(told: &Arc<Told>, hold: &Arc<FakeHold>, processes: &Arc<Processes>) -> Bench {
+    let (t1, t2, t3) = (told.clone(), told.clone(), told.clone());
+    let ps = processes.clone();
+    let hold = hold.clone();
+    Bench::with(move |c| {
+        c.claimed = Some(Arc::new(move |pid| t1.claimed.lock().unwrap().push(pid)));
+        c.unclaimed = Some(Arc::new(move |pid| t2.unclaimed.lock().unwrap().push(pid)));
+        c.shred = Some(Arc::new(move |p| t3.shredded.lock().unwrap().push(p)));
+        c.peer.hold = Some(hold);
+        c.peer.candidates = Some(Arc::new(move || ps.0.lock().unwrap().clone()));
+    })
+}
+
+struct Launch {
+    b: Bench,
+    token: Zeroizing<String>,
+    told: Arc<Told>,
+    hold: Arc<FakeHold>,
+    processes: Arc<Processes>,
+    /// A start before the launcher's.
+    before: Option<SystemTime>,
+}
+
+/// A token for putty, its file attached, and the launcher reported for it.
+fn launched() -> Launch {
+    let told = Arc::new(Told::default());
+    let hold = Arc::new(FakeHold::default());
+    let processes = Arc::new(Processes::default());
+    let b = reporting(&told, &hold, &processes);
+    let token = ruled(&b, &rule_records(1, PUTTY_IMAGE, None, b""));
+    b.tokens.attach(&token, SESSION_FILE).unwrap();
+    assert!(!b.tokens.launched(&token, LAUNCHER).unwrap());
+    Launch {
+        b,
+        token,
+        told,
+        hold,
+        processes,
+        before: Some(SystemTime::now() - Duration::from_secs(60)),
+    }
+}
+
+fn after_now(secs: u64) -> Option<SystemTime> {
+    Some(SystemTime::now() + Duration::from_secs(secs))
+}
+
+fn plain() -> (Bench, Arc<Told>, Arc<FakeHold>) {
+    let told = Arc::new(Told::default());
+    let hold = Arc::new(FakeHold::default());
+    let b = reporting(&told, &hold, &Arc::new(Processes::default()));
+    (b, told, hold)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_claim_shreds_only_that_tokens_file() {
+    let (mut b, told, _) = plain();
+    let token = b.issue();
+    let other = b.issue();
+    b.tokens.attach(&token, SESSION_FILE).unwrap();
+    b.tokens.attach(&other, OTHER_FILE).unwrap();
+    settle().await;
+    assert!(told.shredded().is_empty());
+    b.admit(&token, &in_tree(&[PUTTY]));
+    settle().await;
+    assert_eq!(told.shredded(), [SESSION_FILE]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_caller_leaves_the_file() {
+    let (b, told, _) = plain();
+    let token = ruled(&b, &rule_records(1, PUTTY_IMAGE, None, b""));
+    b.tokens.attach(&token, SESSION_FILE).unwrap();
+    b.refuse(&token, &with_image(out_of_tree(THIEF), PLINK_IMAGE));
+    settle().await;
+    assert!(told.shredded().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_file_is_shredded_once() {
+    let (mut b, told, _) = plain();
+    let token = b.issue();
+    b.tokens.attach(&token, SESSION_FILE).unwrap();
+    b.admit(&token, &in_tree(&[PUTTY]));
+    settle().await;
+    assert_eq!(told.shredded(), [SESSION_FILE]);
+    b.at(Duration::from_secs(1)).await;
+    b.admit(&token, &in_tree(&[PUTTY]));
+    b.tokens.revoke(&token);
+    settle().await;
+    assert!(told.shredded().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_expired_or_revoked_token_shreds_its_file_and_tells_its_launcher() {
+    let (b, told, _) = plain();
+    let expired = b.issue();
+    b.tokens.attach(&expired, SESSION_FILE).unwrap();
+    b.tokens.launched(&expired, LAUNCHER).unwrap();
+    b.at(DEFAULT_WINDOW + Duration::from_millis(1)).await;
+    assert_eq!(told.shredded(), [SESSION_FILE]);
+    assert_eq!(told.unclaimed(), [LAUNCHER]);
+    let revoked = b.issue();
+    b.tokens.attach(&revoked, OTHER_FILE).unwrap();
+    b.tokens.launched(&revoked, LAUNCHER + 1).unwrap();
+    settle().await;
+    assert!(told.unclaimed().is_empty());
+    b.tokens.revoke(&revoked);
+    settle().await;
+    assert_eq!(told.shredded(), [OTHER_FILE]);
+    assert_eq!(told.unclaimed(), [LAUNCHER + 1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_presentation_shreds_the_file() {
+    let told = Arc::new(Told::default());
+    let t = told.clone();
+    let b = Bench::without_timers(move |c| {
+        c.shred = Some(Arc::new(move |p| t.shredded.lock().unwrap().push(p)));
+    });
+    let token = b.issue();
+    b.tokens.attach(&token, SESSION_FILE).unwrap();
+    b.at(DEFAULT_WINDOW + Duration::from_secs(1)).await;
+    assert_eq!(b.refuse(&token, &in_tree(&[PUTTY])), Refusal::TokenExpired);
+    for _ in 0..100 {
+        if !told.shredded.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(told.shredded(), [SESSION_FILE]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_freeze_refuses_every_token_wipes_and_shreds_and_keeps_what_is_open() {
+    let (b, told, _) = plain();
+    let claimed = b.issue();
+    let open = b.connect(&claimed, &in_tree(&[WINSCP]));
+    let unclaimed = b.issue();
+    b.tokens.attach(&unclaimed, OTHER_FILE).unwrap();
+    settle().await;
+    assert!(told.shredded().is_empty());
+    b.tokens.freeze();
+    settle().await;
+    assert_eq!(told.shredded(), [OTHER_FILE]);
+    for token in [&claimed, &unclaimed] {
+        assert_eq!(b.refuse(token, &in_tree(&[WINSCP])), Refusal::Frozen);
+    }
+    assert_eq!(b.tokens.len(), 2, "a freeze disposes of nothing");
+    assert!(
+        timeout(Duration::ZERO, open.conn.disposed()).await.is_err(),
+        "an open connection was told to close"
+    );
+    let late = b.tokens.issue(issue_for(USER, "127.0.0.1:2222", b"p", &[]));
+    b.tokens.attach(&late, SESSION_FILE).unwrap();
+    settle().await;
+    assert_eq!(told.shredded(), [SESSION_FILE]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_attach_shreds_at_once() {
+    let (mut b, told, _) = plain();
+    let token = b.issue();
+    b.admit(&token, &in_tree(&[PUTTY]));
+    b.tokens.attach(&token, SESSION_FILE).unwrap();
+    settle().await;
+    assert_eq!(told.shredded(), [SESSION_FILE]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn attach_refuses_an_unknown_token_and_a_second_path() {
+    let (b, _, _) = plain();
+    assert_eq!(
+        b.tokens
+            .attach("00112233445566778899aabbccddeeff", SESSION_FILE),
+        Err(AttachError::UnknownToken)
+    );
+    let token = b.issue();
+    b.tokens.attach(&token, SESSION_FILE).unwrap();
+    assert_eq!(
+        b.tokens.attach(&token, OTHER_FILE),
+        Err(AttachError::AlreadyAttached)
+    );
+    assert_eq!(
+        b.tokens
+            .launched("00112233445566778899aabbccddeeff", LAUNCHER),
+        Err(AttachError::UnknownToken)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn take_attachment_admits_the_path_before_the_token_and_hands_the_pid_over() {
+    let (b, _, hold) = plain();
+    let refused = b.tokens.take_attachment(
+        "00112233445566778899aabbccddeeff",
+        Some(SESSION_FILE),
+        Some(LAUNCHER),
+        |_| Err("outside".to_owned()),
+    );
+    assert_eq!(refused, Err(AttachError::Refused("outside".to_owned())));
+    let token = b.issue();
+    assert_eq!(
+        b.tokens
+            .take_attachment(&token, Some(SESSION_FILE), Some(LAUNCHER), |_| Ok(())),
+        Ok(false)
+    );
+    assert_eq!(hold.held(), [LAUNCHER]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_claim_tells_the_reported_process_once() {
+    let (mut b, told, _) = plain();
+    let token = b.issue();
+    assert!(!b.tokens.launched(&token, LAUNCHER).unwrap());
+    settle().await;
+    assert!(told.claimed().is_empty());
+    b.admit(&token, &in_tree(&[LAUNCHER + 1, LAUNCHER]));
+    settle().await;
+    assert_eq!(told.claimed(), [LAUNCHER]);
+    b.admit(&token, &in_tree(&[LAUNCHER + 2, LAUNCHER]));
+    b.tokens.revoke(&token);
+    settle().await;
+    assert!(told.claimed().is_empty());
+    assert!(told.unclaimed().is_empty(), "a revoke after the claim told");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_claim_tells_the_reported_process_without_a_hold() {
+    let told = Arc::new(Told::default());
+    let t = told.clone();
+    let mut b = Bench::with(move |c| {
+        c.claimed = Some(Arc::new(move |pid| t.claimed.lock().unwrap().push(pid)));
+    });
+    let token = b.issue();
+    b.tokens.launched(&token, LAUNCHER).unwrap();
+    b.admit(&token, &in_tree(&[LAUNCHER + 1, LAUNCHER]));
+    settle().await;
+    assert_eq!(told.claimed(), [LAUNCHER]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_report_after_the_claim_is_answered_as_used_and_not_watched() {
+    let (mut b, told, hold) = plain();
+    let token = b.issue();
+    b.admit(&token, &in_tree(&[PUTTY]));
+    assert!(b.tokens.launched(&token, LAUNCHER).unwrap());
+    settle().await;
+    assert!(told.claimed().is_empty());
+    assert!(!hold.held().contains(&LAUNCHER));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unreported_token_tells_nothing() {
+    let (mut b, told, _) = plain();
+    let used = b.issue();
+    b.admit(&used, &in_tree(&[PUTTY]));
+    let revoked = b.issue();
+    b.tokens.revoke(&revoked);
+    settle().await;
+    assert!(told.claimed().is_empty() && told.unclaimed().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_launcher_gone_with_nothing_left_disposes_the_token() {
+    let l = launched();
+    l.processes.set(vec![
+        ProcessImage::new(777, PLINK_IMAGE, l.before),
+        ProcessImage::new(LAUNCHER, PUTTY_IMAGE, l.before),
+    ]);
+    l.hold.exit(LAUNCHER);
+    settle().await;
+    assert_eq!(l.told.shredded(), [SESSION_FILE]);
+    assert_eq!(l.told.unclaimed(), [LAUNCHER]);
+    assert_eq!(l.b.tokens.len(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_tab_handed_to_a_running_window_waits_for_that_window() {
+    let l = launched();
+    l.processes
+        .set(vec![ProcessImage::new(WINDOW, PUTTY_IMAGE, l.before)]);
+    l.hold.exit(LAUNCHER);
+    settle().await;
+    assert_eq!(l.b.tokens.len(), 1);
+    assert!(l.told.shredded().is_empty());
+    l.processes.set(Vec::new());
+    l.hold.exit(WINDOW);
+    settle().await;
+    assert_eq!(l.told.shredded(), [SESSION_FILE]);
+    assert_eq!(
+        l.b.refuse(&l.token, &in_tree(&[PUTTY])),
+        Refusal::UnknownToken
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_waited_window_can_still_use_the_token_and_its_watch_ends() {
+    let mut l = launched();
+    l.processes
+        .set(vec![ProcessImage::new(WINDOW, PUTTY_IMAGE, l.before)]);
+    l.hold.exit(LAUNCHER);
+    settle().await;
+    let before = l.hold.released();
+    l.b.admit(&l.token, &with_image(in_tree(&[WINDOW]), PUTTY_IMAGE));
+    settle().await;
+    assert_eq!(l.told.shredded(), [SESSION_FILE]);
+    assert!(
+        l.hold.released() > before,
+        "the claim left the launch watch on the window running"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_used_token_ignores_its_launcher() {
+    let mut l = launched();
+    l.b.admit(&l.token, &with_image(in_tree(&[PUTTY]), PUTTY_IMAGE));
+    settle().await;
+    l.processes.set(Vec::new());
+    l.hold.exit(LAUNCHER);
+    settle().await;
+    assert_eq!(l.b.tokens.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn what_cannot_be_read_leaves_the_token_to_its_window() {
+    for unreadable in [true, false] {
+        let l = launched();
+        if unreadable {
+            l.processes.set(vec![ProcessImage::unreadable(
+                900,
+                "PUTTY.EXE",
+                "access denied",
+            )]);
+        } else {
+            l.processes.fail();
+        }
+        l.hold.exit(LAUNCHER);
+        settle().await;
+        assert_eq!(l.b.tokens.len(), 1, "unreadable={unreadable}");
+        assert!(l.told.shredded().is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_token_without_a_rule_is_left_to_its_window() {
+    let told = Arc::new(Told::default());
+    let hold = Arc::new(FakeHold::default());
+    let processes = Arc::new(Processes::default());
+    let b = reporting(&told, &hold, &processes);
+    let token = b.issue();
+    b.tokens.attach(&token, SESSION_FILE).unwrap();
+    b.tokens.launched(&token, LAUNCHER).unwrap();
+    hold.exit(LAUNCHER);
+    settle().await;
+    assert_eq!(b.tokens.len(), 1);
+    assert!(told.shredded().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unreadable_process_named_otherwise_is_not_the_program() {
+    let l = launched();
+    l.processes.set(vec![ProcessImage::unreadable(
+        900,
+        "svchost.exe",
+        "session unknown",
+    )]);
+    l.hold.exit(LAUNCHER);
+    settle().await;
+    assert_eq!(l.told.shredded(), [SESSION_FILE]);
+    assert_eq!(l.b.tokens.len(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_window_started_after_the_launcher_is_not_waited_for() {
+    let l = launched();
+    l.processes
+        .set(vec![ProcessImage::new(NEWER, PUTTY_IMAGE, after_now(1))]);
+    l.hold.exit(LAUNCHER);
+    settle().await;
+    assert_eq!(l.told.shredded(), [SESSION_FILE]);
+    assert_eq!(l.b.tokens.len(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_cut_off_stays_at_the_launchers_exit() {
+    let l = launched();
+    l.processes
+        .set(vec![ProcessImage::new(WINDOW, PUTTY_IMAGE, l.before)]);
+    l.hold.exit(LAUNCHER);
+    settle().await;
+    std::thread::sleep(Duration::from_millis(20));
+    let newer = Some(SystemTime::now() - Duration::from_millis(10));
+    l.processes
+        .set(vec![ProcessImage::new(NEWER, PUTTY_IMAGE, newer)]);
+    l.hold.exit(WINDOW);
+    settle().await;
+    assert_eq!(l.told.shredded(), [SESSION_FILE]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_window_with_an_unknown_start_is_waited_for() {
+    let l = launched();
+    l.processes
+        .set(vec![ProcessImage::new(WINDOW, PUTTY_IMAGE, None)]);
+    l.hold.exit(LAUNCHER);
+    settle().await;
+    assert_eq!(l.b.tokens.len(), 1);
+    l.processes.set(Vec::new());
+    l.hold.exit(WINDOW);
+    settle().await;
+    assert_eq!(l.told.shredded(), [SESSION_FILE]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_frozen_tokens_launch_is_recorded_and_not_watched() {
+    let (b, told, hold) = plain();
+    let token = b.issue();
+    b.tokens.freeze();
+    assert!(!b.tokens.launched(&token, LAUNCHER).unwrap());
+    assert!(hold.held().is_empty());
+    b.tokens.revoke(&token);
+    settle().await;
+    assert_eq!(told.unclaimed(), [LAUNCHER]);
 }

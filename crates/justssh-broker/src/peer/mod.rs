@@ -17,15 +17,18 @@ use std::sync::Arc;
 use crate::tokens::{Config, Peer};
 
 /// The tokens' configuration on this machine: acwbroker's defaults, this process's session
-/// and account, the version-resource reader, the exit watch, and the parent as the app.
+/// and account, the version-resource reader, the exit watch, the processes of this session,
+/// and the parent as the app.
 pub fn config() -> Result<Config, String> {
+    let session = own_session()?;
     Ok(Config {
         app: parent().unwrap_or(0),
         peer: Peer {
-            own_session: own_session()?,
+            own_session: session,
             own_user: own_user(),
             metadata: Some(Arc::new(metadata)),
             hold: Some(Arc::new(Holder)),
+            candidates: Some(Arc::new(move || candidates(session))),
         },
         ..Config::default()
     })

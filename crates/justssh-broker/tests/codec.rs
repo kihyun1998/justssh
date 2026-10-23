@@ -82,6 +82,9 @@ fn what_the_broker_writes_matches_the_documented_layouts() {
         *handoff::token("00112233445566778899aabbccddeeff"),
         unhex(TOKEN_GOLDEN)
     );
+    assert_eq!(handoff::pid(48879), unhex("51000000040000beef"));
+    assert_eq!(handoff::attached(true), unhex("520000000101"));
+    assert!(handoff::attached(false).is_empty());
 }
 
 #[test]
@@ -106,6 +109,9 @@ fn the_frame_kinds_keep_their_bytes() {
         (Kind::Error, 0x05),
         (Kind::Freeze, 0x07),
         (Kind::Attach, 0x08),
+        (Kind::Attached, 0x09),
+        (Kind::Claimed, 0x0a),
+        (Kind::Disposed, 0x0b),
     ];
     for (kind, byte) in kinds {
         assert_eq!(kind as u8, byte, "{kind:?}");
@@ -181,13 +187,29 @@ fn a_freeze_and_an_attach_are_read_as_acwbroker_reads_them() {
         assert!(handoff::decode_freeze(&unhex(bad)).is_err(), "{bad}");
     }
     let token = "200000000430303131";
-    for good in [
-        format!("{token}500000000143"),
-        format!("{token}51000000040000beef"),
-        format!("{token}500000000143510000000400000001"),
+    for (good, path, pid) in [
+        (format!("{token}500000000143"), Some("C"), None),
+        (format!("{token}51000000040000beef"), None, Some(0xbeef)),
+        (
+            format!("{token}500000000143510000000400000001"),
+            Some("C"),
+            Some(1),
+        ),
     ] {
-        assert!(handoff::decode_attach(&unhex(&good)).is_ok(), "{good}");
+        let a = handoff::decode_attach(&unhex(&good)).unwrap();
+        assert_eq!(
+            (a.token.as_str(), a.path.as_deref(), a.pid),
+            ("0011", path, pid),
+            "{good}"
+        );
     }
+    let golden = "20000000203030313132323333343435353636373738383939616162626363646465656666\
+                  51000000040000beef";
+    let a = handoff::decode_attach(&unhex(golden)).unwrap();
+    assert_eq!(
+        (a.token.as_str(), a.pid),
+        ("00112233445566778899aabbccddeeff", Some(48879))
+    );
     for bad in [
         token.to_owned(),
         "500000000143".to_owned(),

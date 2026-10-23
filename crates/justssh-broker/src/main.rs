@@ -5,6 +5,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 
 use justssh::HostKey;
@@ -12,8 +13,11 @@ use justssh_broker::broker;
 use justssh_broker::hostkey;
 use justssh_broker::issue::require_loopback;
 use justssh_broker::peer;
-use justssh_broker::session::Session;
-use justssh_broker::tokens::Tokens;
+use justssh_broker::session::{End, Hooks, Session};
+use justssh_broker::shred::Shredder;
+use justssh_broker::tokens::{Hold, Tokens};
+use tokio::runtime::Handle;
+use tokio::task::AbortHandle;
 
 /// acwbroker's flags that this broker acts on; the others are read and ignored.
 #[derive(Debug)]
@@ -21,6 +25,7 @@ struct Options {
     listen: Option<String>,
     host_key: Option<PathBuf>,
     dial_timeout: Duration,
+    attach_roots: Vec<PathBuf>,
     version: bool,
 }
 
@@ -30,6 +35,7 @@ impl Default for Options {
             listen: None,
             host_key: None,
             dial_timeout: Duration::from_secs(15),
+            attach_roots: Vec::new(),
             version: false,
         }
     }
@@ -81,6 +87,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
         match name {
             "listen" => options.listen = Some(value),
             "host-key" => options.host_key = Some(PathBuf::from(value)),
+            "attach-root" => options.attach_roots.push(PathBuf::from(value)),
             "dial-timeout" => {
                 options.dial_timeout = duration(&value)
                     .ok_or_else(|| format!("invalid value {value:?} for flag -dial-timeout"))?;
@@ -142,9 +149,9 @@ fn main() -> ExitCode {
 }
 
 fn run(options: Options) -> Result<(), String> {
-    let mut session = Session::new(std::io::stdin().lock(), std::io::stdout().lock());
+    let mut session = Session::new(std::io::stdin(), std::io::stdout());
     session.handshake().map_err(|e| format!("{e:?}"))?;
-    let config = match peer::config() {
+    let mut config = match peer::config() {
         Ok(config) => config,
         Err(e) => {
             let _ = session.fail("session unavailable");
@@ -180,6 +187,16 @@ fn run(options: Options) -> Result<(), String> {
         .announce(&bound.to_string(), &key.private_key().plain_public_blob())
         .map_err(|e| format!("{e:?}"))?;
 
+    let shredder = Shredder::new(options.attach_roots);
+    let pipe = session.pipe();
+    config.claimed = Some(Arc::new(move |pid| pipe.claimed(pid)));
+    let pipe = session.pipe();
+    config.unclaimed = Some(Arc::new(move |pid| pipe.disposed(pid)));
+    let shred = shredder.clone();
+    config.shred = Some(Arc::new(move |path| {
+        let shred = shred.clone();
+        std::thread::spawn(move || shred.shred(&path));
+    }));
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let tokens = Tokens::new(config, runtime.handle().clone());
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -188,14 +205,75 @@ fn run(options: Options) -> Result<(), String> {
         tokio::net::TcpListener::from_std(listener).map_err(|e| e.to_string())?
     };
     let host_key = HostKey::new(key.private_key().clone());
-    runtime.spawn(broker::serve(
+    let serving = runtime.spawn(broker::serve(
         listener,
         host_key,
         tokens.clone(),
         options.dial_timeout,
         Arc::new(peer::probe),
     ));
-    let served = session.serve(&tokens).map_err(|e| format!("{e:?}"));
+    let (events, ended) = channel();
+    let mut hooks = Freezer {
+        tokens: tokens.clone(),
+        serving: serving.abort_handle(),
+        shredder,
+        runtime: runtime.handle().clone(),
+        events: events.clone(),
+    };
+    std::thread::spawn(move || {
+        let served = session.serve(&tokens, &mut hooks);
+        let _ = events.send(Event::PipeEnded(served, session.frozen()));
+    });
+    let result = match ended.recv() {
+        Ok(Event::PipeEnded(served, false)) => served.map_err(|e| format!("{e:?}")),
+        Ok(Event::PipeEnded(_, true)) => {
+            if ended.iter().all(|e| !matches!(e, Event::TunnelExited)) {
+                loop {
+                    std::thread::park();
+                }
+            }
+            Ok(())
+        }
+        Ok(Event::TunnelExited) => Ok(()),
+        Err(_) => Err("the handoff session ended without saying how".to_owned()),
+    };
     runtime.shutdown_background();
-    served
+    result
+}
+
+/// What ends the process: the pipe ending, and whether it had frozen, or the tunnel a FREEZE
+/// watches exiting.
+enum Event {
+    PipeEnded(Result<(), End>, bool),
+    TunnelExited,
+}
+
+/// Carries out a FREEZE and judges ATTACH paths.
+struct Freezer {
+    tokens: Tokens,
+    serving: AbortHandle,
+    shredder: Shredder,
+    runtime: Handle,
+    events: Sender<Event>,
+}
+
+impl Hooks for Freezer {
+    /// Watches `tunnel` first, changing nothing when it cannot; then the tokens take nothing
+    /// more and the listener closes. Connections already accepted go on.
+    fn freeze(&mut self, tunnel: u32) -> Result<(), String> {
+        let held = peer::Holder::default().hold(tunnel)?;
+        self.tokens.freeze();
+        self.serving.abort();
+        let events = self.events.clone();
+        self.runtime.spawn(async move {
+            if held.exited().await {
+                let _ = events.send(Event::TunnelExited);
+            }
+        });
+        Ok(())
+    }
+
+    fn admit(&self, path: &str) -> Result<(), String> {
+        self.shredder.admit(path)
+    }
 }

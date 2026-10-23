@@ -45,6 +45,39 @@ pub struct ProcessInfo {
     pub name: String,
 }
 
+/// One process of this session with its full executable path, or why that could not be read.
+/// `name` is the executable's file name, which the process list carries even then.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProcessImage {
+    pub pid: u32,
+    pub name: String,
+    pub image: String,
+    pub created: Option<SystemTime>,
+    pub error: Option<String>,
+}
+
+impl ProcessImage {
+    pub fn new(pid: u32, image: &str, created: Option<SystemTime>) -> Self {
+        ProcessImage {
+            pid,
+            image: image.to_owned(),
+            created,
+            ..ProcessImage::default()
+        }
+    }
+
+    /// A process whose path could not be read, known by its file name.
+    pub fn unreadable(pid: u32, name: &str, error: &str) -> Self {
+        ProcessImage {
+            pid,
+            name: name.to_owned(),
+            error: Some(error.to_owned()),
+            ..ProcessImage::default()
+        }
+    }
+}
+
 /// A snapshot of the process list.
 pub trait ProcessTable {
     fn info(&self, pid: u32) -> Result<ProcessInfo, String>;

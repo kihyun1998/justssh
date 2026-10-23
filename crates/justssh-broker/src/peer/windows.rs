@@ -14,7 +14,8 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileVersionInfoSizeW, GetFileVersionInfoW, GetLongPathNameW, VerQueryValueW,
+    FILE_ATTRIBUTE_REPARSE_POINT, FindClose, FindFirstFileW, GetFileVersionInfoSizeW,
+    GetFileVersionInfoW, GetLongPathNameW, VerQueryValueW, WIN32_FIND_DATAW,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -26,7 +27,7 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject,
 };
 
-use crate::caller::{Caller, Owner, ProcessInfo, ProcessTable};
+use crate::caller::{Caller, Owner, ProcessImage, ProcessInfo, ProcessTable};
 use crate::rule::ImageMetadata;
 use crate::tokens::{Held, Hold};
 
@@ -255,6 +256,38 @@ pub fn parent() -> Option<u32> {
     table().ok()?.by_pid.get(&own).map(|p| p.parent)
 }
 
+/// Every process in `session` with its full executable path, or why that could not be read.
+/// A process whose session cannot be read is listed too, as unreadable: it might be in it.
+pub fn candidates(session: Option<u32>) -> Result<Vec<ProcessImage>, String> {
+    let t = table()?;
+    let mut out = Vec::new();
+    for (&pid, info) in t.by_pid.iter().filter(|(pid, _)| **pid != 0) {
+        let Some(s) = session_of(pid) else {
+            out.push(ProcessImage::unreadable(
+                pid,
+                &info.name,
+                "peer: the process's session could not be read",
+            ));
+            continue;
+        };
+        if Some(s) != session {
+            continue;
+        }
+        let (image, error) = match image_path(pid) {
+            Ok(image) => (image, None),
+            Err(e) => (String::new(), Some(e)),
+        };
+        out.push(ProcessImage {
+            pid,
+            name: info.name.clone(),
+            image,
+            created: created(pid),
+            error,
+        });
+    }
+    Ok(out)
+}
+
 /// One snapshot of the process list. Start times are read per process asked about.
 pub struct Table {
     by_pid: HashMap<u32, ProcessInfo>,
@@ -408,6 +441,18 @@ fn query_string(buf: &[u8], sub: &str) -> String {
     let s = unsafe { std::slice::from_raw_parts(p.cast::<u16>(), n as usize) };
     let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
     String::from_utf16_lossy(&s[..end])
+}
+
+/// The reparse tag of what is at `path`, when it is a reparse point and can be read.
+pub fn reparse_tag(path: &str) -> Option<u32> {
+    let name = wide(path);
+    let mut data = WIN32_FIND_DATAW::default();
+    let h = unsafe { FindFirstFileW(name.as_ptr(), &mut data) };
+    if h == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    unsafe { FindClose(h) };
+    (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0).then_some(data.dwReserved0)
 }
 
 /// Watches processes for their exit through a handle, which binds the watch to the process

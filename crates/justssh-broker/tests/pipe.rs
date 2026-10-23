@@ -205,11 +205,26 @@ fn the_broker_announces_itself_and_hands_out_a_token_per_issue() {
         8,
         &[rec(0x20, first.as_bytes()), rec(0x51, b"\0\0\xbe\xef")].concat(),
     );
-    let (kind, reply) = b.next().unwrap();
-    assert_eq!(
-        (kind, field(&reply, 0x30)),
-        (5, Some(b"attach is not supported".to_vec()))
-    );
+    assert_eq!(b.next(), Some((9, Vec::new())));
+    for refused in [
+        [
+            rec(0x20, b"00112233445566778899aabbccddeeff"),
+            rec(0x51, b"\0\0\xbe\xef"),
+        ]
+        .concat(),
+        [
+            rec(0x20, second.as_bytes()),
+            rec(0x50, dir.join("x").to_str().unwrap().as_bytes()),
+        ]
+        .concat(),
+    ] {
+        b.send(8, &refused);
+        let (kind, reply) = b.next().unwrap();
+        assert_eq!(
+            (kind, field(&reply, 0x30)),
+            (5, Some(b"attach refused".to_vec()))
+        );
+    }
     assert!(b.issue(&password_issue(b"127.0.0.7:51201", &[])).is_ok());
 
     assert_eq!(b.finish(), (0, Vec::new()));
@@ -318,9 +333,9 @@ fn what_the_session_cannot_go_on_from_ends_it_as_acwbroker_ends_it() {
         ),
         ("token", frame(3, &[]), Some("unknown frame kind")),
         (
-            "freeze",
-            frame(7, &rec(0x40, b"\0\0\xbe\xef")),
-            Some("freeze is not supported"),
+            "freeze of no process",
+            frame(7, &rec(0x40, b"\xff\xff\xff\xfc")),
+            Some("tunnel could not be watched"),
         ),
         (
             "bad freeze",
@@ -370,4 +385,43 @@ fn a_listen_address_or_host_key_that_cannot_be_used_is_reported_before_exiting()
         );
         assert_eq!(b.finish(), (1, Vec::new()), "{name}");
     }
+}
+
+/// A frozen broker refuses ISSUE, outlives the pipe and ends when the tunnel it watches does
+/// (acwbroker `cmd/acwbroker/freeze_test.go`). Windows only: elsewhere no process is watched.
+#[cfg(windows)]
+#[test]
+fn a_frozen_broker_outlives_the_pipe_and_ends_with_its_tunnel() {
+    let dir = scratch("freeze");
+    let mut tunnel = Command::new("cmd")
+        .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut b = Broker::start(&dir, &dir.join("hostkey"), "127.0.0.1:0");
+    let (addr, _) = b.ready();
+    b.send(7, &rec(0x40, &tunnel.id().to_be_bytes()));
+    assert_eq!(
+        b.issue(&password_issue(b"127.0.0.7:51201", &[])),
+        Err("frozen".into())
+    );
+    b.send(7, &rec(0x40, b"\0\0\0\0"));
+    assert_eq!(
+        b.issue(&password_issue(b"127.0.0.7:51201", &[])),
+        Err("frozen".into()),
+        "a second FREEZE is not read"
+    );
+    b.close();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert!(
+        b.child.try_wait().unwrap().is_none(),
+        "the broker ended with the pipe"
+    );
+    assert!(
+        std::net::TcpStream::connect(&addr).is_err(),
+        "the listener is still open"
+    );
+    tunnel.kill().unwrap();
+    tunnel.wait().unwrap();
+    assert_eq!(b.finish(), (0, Vec::new()));
 }

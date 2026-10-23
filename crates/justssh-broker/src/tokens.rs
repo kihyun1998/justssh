@@ -2,7 +2,7 @@
 //! who may present them for how long (acwbroker `service/tokens`).
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use subtle::ConstantTimeEq;
 use tokio::runtime::Handle as Runtime;
@@ -11,7 +11,7 @@ use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until};
 use zeroize::Zeroizing;
 
-use crate::caller::{Caller, ProcessKey};
+use crate::caller::{Caller, ProcessImage, ProcessKey};
 use crate::issue::{Issue, Method};
 use crate::rule::{self, ImageMetadata};
 
@@ -35,7 +35,23 @@ pub struct Config {
     /// The process every program the app launches descends from. Zero puts nothing in tree.
     pub app: u32,
     pub peer: Peer,
+    /// Told, each, the processes reported for a token when it is first used.
+    pub claimed: Option<Tell>,
+    /// Told, each, the processes reported for a token disposed of before its first use.
+    pub unclaimed: Option<Tell>,
+    /// Handed each path attached to a token once the token is used, expires, is disposed of
+    /// or the tokens freeze. Without it every attached path is kept.
+    pub shred: Option<Shred>,
 }
+
+/// Told a process id, on the tokens' runtime.
+pub type Tell = Arc<dyn Fn(u32) + Send + Sync>;
+
+/// Handed a path to shred, on the tokens' runtime.
+pub type Shred = Arc<dyn Fn(String) + Send + Sync>;
+
+/// Lists the processes of this session with their executables.
+pub type Candidates = Arc<dyn Fn() -> Result<Vec<ProcessImage>, String> + Send + Sync>;
 
 /// What the tokens ask of this machine. Every field left empty turns its check off.
 #[derive(Clone, Default)]
@@ -47,8 +63,11 @@ pub struct Peer {
     pub own_user: Option<String>,
     /// Reads an executable's version resource, for the caller rules that fall back to it.
     pub metadata: Option<ReadImage>,
-    /// Watches pinned processes for their exit.
+    /// Watches pinned processes, and launched ones before use, for their exit.
     pub hold: Option<Arc<dyn Hold>>,
+    /// What else in this session could present a token whose launched process has gone.
+    /// Without it such a token is left to its window.
+    pub candidates: Option<Candidates>,
 }
 
 /// Reads an executable's version resource.
@@ -80,6 +99,7 @@ impl Held {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Refusal {
+    Frozen,
     SessionUnknown,
     OtherSession,
     OwnerUnknown,
@@ -92,6 +112,16 @@ pub enum Refusal {
     TokenExpired,
     AdmissionClosed,
     CallerNotPinned,
+}
+
+/// Why an ATTACH was not taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AttachError {
+    UnknownToken,
+    AlreadyAttached,
+    /// The path may not be shredded.
+    Refused(String),
 }
 
 /// Which pin rule let an accepted connection in.
@@ -117,6 +147,9 @@ impl Default for Config {
             admit: DEFAULT_ADMIT,
             app: 0,
             peer: Peer::default(),
+            claimed: None,
+            unclaimed: None,
+            shred: None,
         }
     }
 }
@@ -141,12 +174,22 @@ struct Entry {
     alive: usize,
     expiry: Option<AbortHandle>,
     idle: Option<AbortHandle>,
+    /// The path the app wrote the token into, until it is handed to the shredder.
+    attached: Option<String>,
+    /// The processes the app launched for the token, until its first use.
+    reported: Vec<u32>,
+    /// While nothing has used the token, the processes that could still present it.
+    launch: Vec<(u32, AbortHandle)>,
+    /// When the launched process exited with the token unused.
+    launched_gone: Option<SystemTime>,
 }
 
 #[derive(Default)]
 struct Issued {
     next: u64,
     entries: Vec<Entry>,
+    /// No authorization is taken any more.
+    frozen: bool,
 }
 
 struct Inner {
@@ -242,7 +285,7 @@ impl Tokens {
             self.after(c.window, move |t| {
                 let mut issued = t.lock();
                 if issued.find(id).is_some_and(|e| e.first_at.is_none()) {
-                    issued.remove(id);
+                    t.dispose(&mut issued, id);
                 }
             })
         });
@@ -262,8 +305,207 @@ impl Tokens {
             alive: 0,
             expiry,
             idle: None,
+            attached: None,
+            reported: Vec::new(),
+            launch: Vec::new(),
+            launched_gone: None,
         });
         token
+    }
+
+    /// Stops taking authorizations for good, wipes every credential and shreds every attached
+    /// path. Connections already open go on, and the tokens' timers and watches still end them.
+    pub fn freeze(&self) {
+        let mut issued = self.lock();
+        issued.frozen = true;
+        for e in issued.entries.iter_mut() {
+            let i = &mut e.issue;
+            (i.password, i.private_key, i.passphrase, i.certificate) = (None, None, None, None);
+            self.shred(e);
+        }
+    }
+
+    /// Carries out an ATTACH: `path`, once `admit` takes it, is attached to `token`, then
+    /// `pid` is recorded as launched to use it. Says whether the token was already used.
+    pub fn take_attachment(
+        &self,
+        token: &str,
+        path: Option<&str>,
+        pid: Option<u32>,
+        admit: impl FnOnce(&str) -> Result<(), String>,
+    ) -> Result<bool, AttachError> {
+        if let Some(path) = path {
+            admit(path).map_err(AttachError::Refused)?;
+            self.attach(token, path)?;
+        }
+        match pid {
+            Some(pid) => self.launched(token, pid),
+            None => Ok(false),
+        }
+    }
+
+    /// Hands `path` to `token`, to be shredded once the token is used, expires or is disposed
+    /// of; at once when it already was used or the tokens are frozen.
+    pub fn attach(&self, token: &str, path: &str) -> Result<(), AttachError> {
+        let mut issued = self.lock();
+        let frozen = issued.frozen;
+        let e = issued.by_token(token).ok_or(AttachError::UnknownToken)?;
+        if e.attached.is_some() {
+            return Err(AttachError::AlreadyAttached);
+        }
+        e.attached = Some(path.to_owned());
+        if frozen || e.first_at.is_some() {
+            self.shred(e);
+        }
+        Ok(())
+    }
+
+    /// Records `pid` as the process the app launched to use `token`, to be told when the token
+    /// is first used, and watches it: when it exits with the token unused, whatever in this
+    /// session could still present the token is watched in its place, and with nothing left
+    /// the token is disposed of. Says whether the token was already used, when nothing is
+    /// recorded.
+    pub fn launched(&self, token: &str, pid: u32) -> Result<bool, AttachError> {
+        let mut issued = self.lock();
+        let frozen = issued.frozen;
+        let e = issued.by_token(token).ok_or(AttachError::UnknownToken)?;
+        if e.first_at.is_some() {
+            return Ok(true);
+        }
+        e.reported.push(pid);
+        if !frozen {
+            self.watch_launch(e, pid);
+        }
+        Ok(false)
+    }
+
+    /// Watches `pid` for `e` while it is unused, and says whether it could.
+    fn watch_launch(&self, e: &mut Entry, pid: u32) -> bool {
+        if e.launch.iter().any(|(p, _)| *p == pid) {
+            return true;
+        }
+        let Some(Ok(held)) = self.0.config.peer.hold.as_ref().map(|h| h.hold(pid)) else {
+            return false;
+        };
+        let (tokens, id) = (Arc::downgrade(&self.0), e.id);
+        let watch = self.0.runtime.spawn(async move {
+            if held.exited().await
+                && let Some(inner) = tokens.upgrade()
+            {
+                Tokens(inner).launch_gone(id, pid);
+            }
+        });
+        e.launch.push((pid, watch.abort_handle()));
+        true
+    }
+
+    /// A process watched for unused token `id` has exited. With none left, the processes of
+    /// this session that the token's rule admits and that started before the first such exit
+    /// are watched in its place; with none of those either, the token is disposed of. Without
+    /// a rule or a process list, or with a process named like the program that cannot be
+    /// read, it is left to its window.
+    fn launch_gone(&self, id: u64, pid: u32) {
+        let c = &self.0.config;
+        let mut issued = self.lock();
+        let Some(e) = issued.find(id) else {
+            return;
+        };
+        if let Some(i) = e.launch.iter().position(|(p, _)| *p == pid) {
+            e.launch.remove(i).1.abort();
+        }
+        if !e.launch.is_empty() {
+            return;
+        }
+        let cutoff = *e.launched_gone.get_or_insert_with(SystemTime::now);
+        let (Some(rule), Some(read)) = (e.issue.rule.clone(), c.peer.candidates.clone()) else {
+            return;
+        };
+        drop(issued);
+
+        let Ok(list) = read() else {
+            return;
+        };
+        let metadata = c
+            .peer
+            .metadata
+            .as_deref()
+            .map(|m| m as rule::ReadMetadata<'_>);
+        let mut users = Vec::new();
+        for p in list.iter().filter(|p| p.pid != pid) {
+            if p.error.is_some() {
+                if rule::named_like(&rule, &p.name) {
+                    return;
+                }
+                continue;
+            }
+            if rule::admits(Some(&rule), &p.image, metadata).is_err() {
+                continue;
+            }
+            if p.created.is_some_and(|t| t > cutoff) {
+                continue;
+            }
+            users.push(p.pid);
+        }
+
+        let mut issued = self.lock();
+        let Some(e) = issued.find(id) else {
+            return;
+        };
+        if e.first_at.is_some() || !e.launch.is_empty() {
+            return;
+        }
+        for u in users {
+            if !self.watch_launch(e, u) {
+                return;
+            }
+        }
+        if e.launch.is_empty() {
+            self.dispose(&mut issued, id);
+        }
+    }
+
+    /// Hands `e`'s attached path to the shredder, once.
+    fn shred(&self, e: &mut Entry) {
+        let (Some(path), Some(shred)) = (e.attached.take(), self.0.config.shred.clone()) else {
+            return;
+        };
+        self.0.runtime.spawn(async move { shred(path) });
+    }
+
+    /// Tells `tell` each of `pids`.
+    fn tell(&self, tell: Option<&Tell>, pids: Vec<u32>) {
+        let Some(tell) = tell.cloned() else {
+            return;
+        };
+        if pids.is_empty() {
+            return;
+        }
+        self.0.runtime.spawn(async move {
+            for pid in pids {
+                tell(pid);
+            }
+        });
+    }
+
+    /// Disposes of token `id`: the processes reported for it are told it went unused, its
+    /// path is shredded, its live upstreams are told to close, its timers and watches stop,
+    /// and its token and credential are zeroed as they drop.
+    fn dispose(&self, issued: &mut Issued, id: u64) {
+        let Some(mut e) = issued.remove(id) else {
+            return;
+        };
+        self.tell(
+            self.0.config.unclaimed.as_ref(),
+            std::mem::take(&mut e.reported),
+        );
+        self.shred(&mut e);
+        for (_, up) in &e.ups {
+            up.notify_one();
+        }
+        let launch = e.launch.iter().map(|(_, t)| t);
+        for t in e.holds.iter().chain(&e.expiry).chain(&e.idle).chain(launch) {
+            t.abort();
+        }
     }
 
     /// Disposes of `token` and everything it holds, and says whether there was one.
@@ -277,7 +519,7 @@ impl Tokens {
         else {
             return false;
         };
-        issued.remove(id);
+        self.dispose(&mut issued, id);
         true
     }
 
@@ -291,7 +533,7 @@ impl Tokens {
     }
 
     /// What `presented` stands for when `caller` may use it as `username`, checked in
-    /// acwbroker's order: the logon session, the connection's owner, the user, the token
+    /// acwbroker's order: the freeze, the logon session, the connection's owner, the user, the token
     /// (every one compared in constant time, with no early return), the username, the caller
     /// rule, then the pin rules.
     pub fn authorize(
@@ -303,6 +545,9 @@ impl Tokens {
         let c = &self.0.config;
         let mut issued = self.lock();
         let peer = &c.peer;
+        if issued.frozen {
+            return Err(Refusal::Frozen);
+        }
         if let Some(own) = peer.own_session {
             match caller.session {
                 None => return Err(Refusal::SessionUnknown),
@@ -379,11 +624,16 @@ impl Tokens {
         }
         let Some(first) = e.first_at else {
             if !c.window.is_zero() && now - e.issued_at > c.window {
-                issued.remove(id);
+                self.dispose(issued, id);
                 return Err(Refusal::TokenExpired);
             }
             e.first_at = Some(now);
             if let Some(t) = e.expiry.take() {
+                t.abort();
+            }
+            self.shred(e);
+            self.tell(c.claimed.as_ref(), std::mem::take(&mut e.reported));
+            for (_, t) in e.launch.drain(..) {
                 t.abort();
             }
             self.claim(issued, id, caller);
@@ -440,7 +690,7 @@ impl Tokens {
         e.pins.retain(|&p| p != pid);
         e.alive -= 1;
         if e.alive == 0 {
-            issued.remove(id);
+            self.dispose(&mut issued, id);
         }
     }
 
@@ -475,7 +725,7 @@ impl Tokens {
         e.idle = Some(self.after(delay, move |t| {
             let mut issued = t.lock();
             if issued.find(id).is_some_and(|e| e.conns == 0) {
-                issued.remove(id);
+                t.dispose(&mut issued, id);
             }
         }));
     }
@@ -512,19 +762,13 @@ impl Issued {
         self.entries.iter_mut().find(|e| e.id == id)
     }
 
-    /// Disposes of token `id`: its live upstreams are told to close, its timers and watches
-    /// stop, and its token and credential are zeroed as they drop.
-    fn remove(&mut self, id: u64) {
-        let Some(i) = self.entries.iter().position(|e| e.id == id) else {
-            return;
-        };
-        let e = self.entries.swap_remove(i);
-        for (_, up) in &e.ups {
-            up.notify_one();
-        }
-        for t in e.holds.iter().chain(&e.expiry).chain(&e.idle) {
-            t.abort();
-        }
+    fn by_token(&mut self, token: &str) -> Option<&mut Entry> {
+        self.entries.iter_mut().find(|e| e.token.as_str() == token)
+    }
+
+    fn remove(&mut self, id: u64) -> Option<Entry> {
+        let i = self.entries.iter().position(|e| e.id == id)?;
+        Some(self.entries.swap_remove(i))
     }
 }
 
