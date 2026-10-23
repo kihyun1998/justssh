@@ -48,7 +48,7 @@ Several parts of acwbroker are absent:
 - The log file.
 - The legacy RSA host key.
 
-`-logpath`, `-profile`, `-attach-root` and `-unsafe-no-harden` are accepted, as Go's `flag` package accepts them, and change nothing. `-dial-timeout` bounds the upstream TCP connect, read as Go's `time.ParseDuration` reads it. The SSH side is in `broker-relay.md`. The policy (#60), key credentials (#61), token lifetime and caller checks (#62), and FREEZE, ATTACH, CLAIMED and DISPOSED (#63) are still to come.
+`-logpath`, `-profile`, `-attach-root` and `-unsafe-no-harden` are accepted, as Go's `flag` package accepts them, and change nothing. `-dial-timeout` bounds the upstream TCP connect, read as Go's `time.ParseDuration` reads it. The SSH side is in `broker-relay.md`. Token lifetime and caller checks are in `broker-tokens.md`. Key credentials (#61), and FREEZE, ATTACH, CLAIMED and DISPOSED (#63), are still to come.
 
 ## The host key file
 
