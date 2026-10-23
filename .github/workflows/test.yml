@@ -26,6 +26,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Clippy for Windows (the broker's caller measurement, crates/justssh-broker/src/peer/windows.rs)
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo clippy -p justssh-broker --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.25"

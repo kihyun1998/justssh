@@ -9,7 +9,7 @@ Each downstream connection runs in a task of its own, as acwbroker's `broker.go`
 Authentication follows acwbroker's `authenticate`:
 - One password attempt.
 - Three minutes to get past authentication (`Deadlines`).
-- The presented password is compared, in constant time, with every token issued, with no early return. The token's username must be the one the client sent.
+- The caller is measured from the connection's remote address, and the presented password is judged with it (`broker-tokens.md`).
 - The upstream is reached inside that judgement, so an upstream that refuses the credential fails the downstream authentication.
 
 The upstream connection is a TCP connect bounded by `-dial-timeout`, then password and keyboard-interactive, each question answered with the password (Go `passwordAnswers`). There is no deadline after the connect, as there is none in Go (#16, from #7). Any host key is taken (Go `InsecureIgnoreHostKey`), the upstream being acwtunnel on loopback. A channel the upstream opens is refused with `ADMINISTRATIVELY_PROHIBITED` and Go's message.
@@ -41,7 +41,9 @@ No in-process test can see that order. A justssh client fills in a failed reply 
 
 While a refused channel closes, every further request on it is refused without asking the token. Otherwise a `shell` sent there would take the token's shell until the close came back. No test sees that either: the shell is given back the moment the channel closes (a mutation dropping the rule survived, measured on #60).
 
-A token no longer issued allows neither a shell nor a file transfer, as in Go. Nothing removes a token yet (#62, #63).
+A token no longer issued allows neither a shell nor a file transfer, as in Go.
+
+When the token is disposed of, the relay sends the upstream `SSH_MSG_DISCONNECT` and goes on as when the upstream ends: each open channel gets its EOF and is closed once its downstream half is done or after the grace, and a new channel is refused with `CONNECT_FAILED`. The downstream connection stays until the client ends it, as in Go.
 
 Go writes each `shell`, `exec` and `subsystem`, and each refusal, to its log. The minimal broker has no log yet.
 
@@ -57,7 +59,10 @@ Go writes each `shell`, `exec` and `subsystem`, and each refusal, to its log. Th
 - a global request and its answer;
 - a token without file transfer: SFTP and SCP are refused, closed within 2 s and never seen upstream, while the shell goes on;
 - names that only look like a file transfer cross;
-- one shell per token across its connections, given back when its channel ends or its connection drops, and a second `shell` on the channel holding it crossing.
+- one shell per token across its connections, given back when its channel ends or its connection drops, and a second `shell` on the channel holding it crossing;
+- a disposed token: its upstream ended and a new channel refused.
+
+The broker there is given a probe that measures every connection as one process, since nothing is measured off Windows (`broker-tokens.md`).
 
 Against acwbroker's blackbox, with `ACWBROKER_BIN` set to this binary, these 13 pass besides the three of #15 (measured on #59):
 - `TestAnIssueForANonLoopbackUpstreamIsRefusedAndTheSessionGoesOn`
@@ -78,4 +83,4 @@ With #60 these two pass as well. Built without it, the broker fails both:
 - `TestATokenWithoutFileTransferRefusesSFTPAndSCPAndKeepsTheShell`
 - `TestOneShellPerTokenAcrossItsConnections`
 
-The five that still fail wait on #61, #62 and #63 (measured on #60).
+With #62, `TestATokenIsGoneOnceTheProgramThatClaimedItExits` passes as well. The five that still fail wait on #61 (two) and #63 (three) (measured on #62).

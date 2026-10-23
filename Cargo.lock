@@ -677,6 +677,7 @@ dependencies = [
  "justssh-tokio",
  "subtle",
  "tokio",
+ "windows-sys",
  "zeroize",
 ]
 

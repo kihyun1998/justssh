@@ -14,10 +14,22 @@ getrandom = { workspace = true, features = ["sys_rng"] }
 zeroize.workspace = true
 subtle.workspace = true
 justssh-tokio = { path = "../justssh-tokio" }
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-util", "sync"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-util", "sync", "test-util"] }
 
 [lints]
 workspace = true

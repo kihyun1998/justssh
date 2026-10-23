@@ -3,19 +3,22 @@
 //! `service/relay`, `infrastructure/upstream`).
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::Duration;
 
 use justssh::{
-    Action, ChannelId, Client, ClientConfig, Endpoint, HostKey, InfoRequest, OpenFailureReason,
-    Phase, ReplyToken, RequestToken, Server, ServerConfig, Zeroizing,
+    Action, ChannelId, Client, ClientConfig, DisconnectReason, Endpoint, HostKey, InfoRequest,
+    OpenFailureReason, Phase, ReplyToken, RequestToken, Server, ServerConfig, Zeroizing,
 };
 use justssh_tokio::{Accepted, AuthMethod, ClientHandler, Connected, Deadlines, Session};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, sleep_until, timeout};
 
+use crate::caller::Caller;
 use crate::issue::Method;
-use crate::tokens::{Grant, Handle, Shell, Tokens};
+use crate::tokens::{Conn, Grant, Handle, Shell, Tokens};
 
 /// How long a downstream connection has to authenticate.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -29,17 +32,34 @@ const UPSTREAM_OPENS: &str = "acwbroker does not accept upstream-initiated chann
 /// The message a channel the upstream could not be asked about is refused with.
 const UPSTREAM_GONE: &str = "upstream channel open failed";
 
-/// Accepts downstream connections until the listener fails, each in a task of its own.
-pub async fn serve(listener: TcpListener, host_key: HostKey, tokens: Tokens, dial: Duration) {
-    while let Ok((stream, _)) = listener.accept().await {
-        let (host_key, tokens) = (host_key.clone(), tokens.clone());
-        tokio::spawn(connection(stream, host_key, tokens, dial));
+/// Measures who is on the other end of a connection, given its remote address.
+pub type Probe = Arc<dyn Fn(SocketAddr) -> Caller + Send + Sync>;
+
+/// Accepts downstream connections until the listener fails, each in a task of its own, each
+/// caller measured by `probe`.
+pub async fn serve(
+    listener: TcpListener,
+    host_key: HostKey,
+    tokens: Tokens,
+    dial: Duration,
+    probe: Probe,
+) {
+    while let Ok((stream, addr)) = listener.accept().await {
+        let (host_key, tokens, probe) = (host_key.clone(), tokens.clone(), probe.clone());
+        tokio::spawn(connection(stream, addr, host_key, tokens, dial, probe));
     }
 }
 
 /// One downstream connection: a single password attempt, the upstream reached while it is
 /// judged, then the relay.
-async fn connection(stream: TcpStream, host_key: HostKey, tokens: Tokens, dial: Duration) {
+async fn connection(
+    stream: TcpStream,
+    addr: SocketAddr,
+    host_key: HostKey,
+    tokens: Tokens,
+    dial: Duration,
+    probe: Probe,
+) {
     let mut server = Server::new(
         ServerConfig::builder(host_key)
             .max_auth_tries(NonZeroU32::MIN)
@@ -47,17 +67,13 @@ async fn connection(stream: TcpStream, host_key: HostKey, tokens: Tokens, dial: 
     );
     let deadlines = Deadlines::new().phase(Phase::Auth, HANDSHAKE_TIMEOUT);
     let accepted = justssh_tokio::accept(stream, &mut server, &deadlines, |request| {
-        let grant = tokens.authorize(request.password(), request.user());
-        async move {
-            let grant = grant?;
-            let handle = grant.handle.clone();
-            Some((upstream(grant, dial).await?, handle))
-        }
+        let grant = tokens.authorize(request.password(), request.user(), &probe(addr));
+        async move { upstream(grant.ok()?, dial).await }
     })
     .await;
     if let Ok(Accepted::Authenticated { io, value, events }) = accepted {
-        let (up, handle) = value;
-        relay(Session::new(io, server, events), up, &handle).await;
+        let (up, conn) = value;
+        relay(Session::new(io, server, events), up, &conn).await;
     }
 }
 
@@ -75,8 +91,8 @@ impl ClientHandler for Answers {
 }
 
 /// The upstream `grant` names, connected within `dial` and authenticated with its password,
-/// then keyboard-interactive.
-async fn upstream(grant: Grant, dial: Duration) -> Option<Session<TcpStream, Client>> {
+/// then keyboard-interactive, with the connection the grant counts.
+async fn upstream(grant: Grant, dial: Duration) -> Option<(Session<TcpStream, Client>, Conn)> {
     if grant.method != Method::Password {
         return None;
     }
@@ -98,7 +114,9 @@ async fn upstream(grant: Grant, dial: Duration) -> Option<Session<TcpStream, Cli
     .await
     .ok()?;
     match connected {
-        Connected::Authenticated { io, events } => Some(Session::new(io, client, events)),
+        Connected::Authenticated { io, events } => {
+            Some((Session::new(io, client, events), grant.conn))
+        }
         _ => None,
     }
 }
@@ -158,8 +176,10 @@ struct Replies {
 }
 
 /// Relays one authenticated downstream connection to its upstream until the downstream ends,
-/// holding its channels to the policy of the token behind `handle`.
-async fn relay(mut down: Down, mut up: Up, handle: &Handle) {
+/// holding its channels to the policy of the token `conn` counts against, and ending the
+/// upstream when that token is disposed of.
+async fn relay(mut down: Down, mut up: Up, conn: &Conn) {
+    let handle = conn.handle();
     let mut pairs: HashMap<ChannelId, Pair> = HashMap::new();
     let mut up_to_down: HashMap<ChannelId, ChannelId> = HashMap::new();
     let mut opening: HashMap<ChannelId, ChannelId> = HashMap::new();
@@ -170,6 +190,7 @@ async fn relay(mut down: Down, mut up: Up, handle: &Handle) {
         let step = tokio::select! {
             a = down.next() => Step::Down(a),
             a = up.next(), if up_alive => Step::Up(a),
+            () = conn.disposed(), if up_alive => Step::Disposed,
             () = sleep_until(grace.unwrap_or_else(Instant::now)), if grace.is_some() => Step::Grace,
         };
         let result = match step {
@@ -211,6 +232,12 @@ async fn relay(mut down: Down, mut up: Up, handle: &Handle) {
                 )
                 .await
             }
+            Step::Disposed => {
+                up.disconnect(DisconnectReason::BY_APPLICATION, "")
+                    .await
+                    .ok();
+                Ok(())
+            }
             Step::Grace => {
                 let now = Instant::now();
                 let due: Vec<ChannelId> = pairs
@@ -237,6 +264,7 @@ async fn relay(mut down: Down, mut up: Up, handle: &Handle) {
 enum Step {
     Down(std::io::Result<Option<Action>>),
     Up(std::io::Result<Option<Action>>),
+    Disposed,
     Grace,
 }
 
