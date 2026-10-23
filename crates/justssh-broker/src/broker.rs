@@ -15,7 +15,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::issue::Method;
-use crate::tokens::{Grant, Tokens};
+use crate::tokens::{Grant, Handle, Shell, Tokens};
 
 /// How long a downstream connection has to authenticate.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -48,11 +48,16 @@ async fn connection(stream: TcpStream, host_key: HostKey, tokens: Tokens, dial: 
     let deadlines = Deadlines::new().phase(Phase::Auth, HANDSHAKE_TIMEOUT);
     let accepted = justssh_tokio::accept(stream, &mut server, &deadlines, |request| {
         let grant = tokens.authorize(request.password(), request.user());
-        async move { upstream(grant?, dial).await }
+        async move {
+            let grant = grant?;
+            let handle = grant.handle.clone();
+            Some((upstream(grant, dial).await?, handle))
+        }
     })
     .await;
     if let Ok(Accepted::Authenticated { io, value, events }) = accepted {
-        relay(Session::new(io, server, events), value).await;
+        let (up, handle) = value;
+        relay(Session::new(io, server, events), up, &handle).await;
     }
 }
 
@@ -113,6 +118,11 @@ struct Pair {
     down_done: bool,
     /// When the downstream half is closed without waiting further.
     grace: Option<Instant>,
+    /// The token's shell, when this channel holds it.
+    shell: Option<Shell>,
+    /// A request on it was refused: the upstream half is closing, and the downstream half
+    /// closes once it has.
+    refused: bool,
 }
 
 impl Pair {
@@ -126,6 +136,8 @@ impl Pair {
             up_done: false,
             down_done: false,
             grace: None,
+            shell: None,
+            refused: false,
         }
     }
 }
@@ -145,8 +157,9 @@ struct Replies {
     global_to_up: HashMap<RequestToken, justssh::GlobalReplyToken>,
 }
 
-/// Relays one authenticated downstream connection to its upstream until the downstream ends.
-async fn relay(mut down: Down, mut up: Up) {
+/// Relays one authenticated downstream connection to its upstream until the downstream ends,
+/// holding its channels to the policy of the token behind `handle`.
+async fn relay(mut down: Down, mut up: Up, handle: &Handle) {
     let mut pairs: HashMap<ChannelId, Pair> = HashMap::new();
     let mut up_to_down: HashMap<ChannelId, ChannelId> = HashMap::new();
     let mut opening: HashMap<ChannelId, ChannelId> = HashMap::new();
@@ -166,6 +179,7 @@ async fn relay(mut down: Down, mut up: Up) {
                     &mut down,
                     &mut up,
                     up_alive,
+                    handle,
                     &mut pairs,
                     &mut opening,
                     &mut replies,
@@ -255,6 +269,7 @@ async fn from_down(
     down: &mut Down,
     up: &mut Up,
     up_alive: bool,
+    handle: &Handle,
     pairs: &mut HashMap<ChannelId, Pair>,
     opening: &mut HashMap<ChannelId, ChannelId>,
     replies: &mut Replies,
@@ -319,6 +334,17 @@ async fn from_down(
             }
         }
         Action::ChannelRequest(r) => {
+            if let Some(p) = pairs.get_mut(&r.channel())
+                && (p.refused || refuses(p, handle, r.kind().as_bytes(), r.data()))
+            {
+                if let Some(reply) = r.reply() {
+                    down.reply(reply, false).await?;
+                }
+                p.refused = true;
+                p.eof_up = true;
+                up.abort(p.up).await?;
+                return Ok(());
+            }
             let token = match pairs.get(&r.channel()) {
                 Some(p) => {
                     up.request(p.up, r.kind(), r.want_reply(), r.data().to_vec())
@@ -446,6 +472,10 @@ async fn from_up(
             if let Some(d) = up_to_down.remove(&channel)
                 && let Some(p) = pairs.get_mut(&d)
             {
+                if p.refused {
+                    pairs.remove(&d);
+                    return down.abort(d).await;
+                }
                 up_ended(d, p, down).await?;
                 if p.grace.is_none() {
                     pairs.remove(&d);
@@ -502,6 +532,47 @@ async fn from_up(
         _ => {}
     }
     Ok(())
+}
+
+/// Whether the token behind `handle` refuses the request `kind` with `data` on the channel of
+/// `p`: a file transfer the token does not allow, or a shell while the token's one shell is
+/// open elsewhere. A shell it allows is taken for `p` here.
+fn refuses(p: &mut Pair, handle: &Handle, kind: &[u8], data: &[u8]) -> bool {
+    if is_file_transfer(kind, data) && !handle.file_transfer_allowed() {
+        return true;
+    }
+    if kind == b"shell" && p.shell.is_none() {
+        p.shell = handle.open_shell();
+        return p.shell.is_none();
+    }
+    false
+}
+
+/// Whether a channel request starts a file transfer: the subsystem `sftp`, or a command whose
+/// first word's base name is `scp` or `sftp-server`. A payload that is not exactly one string
+/// starts none.
+fn is_file_transfer(kind: &[u8], data: &[u8]) -> bool {
+    let Some(arg) = only_string(data) else {
+        return false;
+    };
+    match kind {
+        b"subsystem" => arg == b"sftp",
+        b"exec" => {
+            let command = String::from_utf8_lossy(arg);
+            let Some(first) = command.split_whitespace().next() else {
+                return false;
+            };
+            let base = first.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+            matches!(base, "scp" | "sftp-server")
+        }
+        _ => false,
+    }
+}
+
+/// The string `data` holds when it holds one and nothing after it.
+fn only_string(data: &[u8]) -> Option<&[u8]> {
+    let (len, rest) = data.split_first_chunk::<4>()?;
+    (rest.len() == u32::from_be_bytes(*len) as usize).then_some(rest)
 }
 
 /// How much of `channel`'s data `s` still holds back for the peer's window.
