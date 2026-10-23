@@ -34,12 +34,42 @@ The loopback check is Go's `net.SplitHostPort` followed by `net.ParseIP`, ported
 
 `the_upstream_must_be_a_loopback_address_as_go_reads_one` holds 37 addresses with the verdict Go 1.26.3 printed for each. Rust's own `is_loopback` disagrees on the mapped form, which is why the check is written out. The listen address goes through the same check before binding, so `0.0.0.0:0` binds nothing and answers `listener unavailable`.
 
+## FREEZE, ATTACH, CLAIMED and DISPOSED
+
+These follow acwbroker's `pipe.go` `handle`, `cmd/acwbroker/freeze.go` and `main.go` `wireAttach` (#63).
+
+- **FREEZE:** the tunnel's process is watched first.
+  - When it cannot be watched, nothing changes, and the session ends with `tunnel could not be watched`. The maintainer's rule in Go is that a frozen broker with no exit to wait for would never end. Off Windows no process can be watched, so a FREEZE always ends the session there.
+  - When it can, the tokens freeze (`broker-tokens.md`) and the listener closes. The serving task is aborted, which drops the listener; connections already accepted are their own tasks and go on.
+  - After that, an ISSUE is refused with `frozen` and the session goes on. A second FREEZE is not read.
+  - The pipe closing then leaves the process running until the tunnel exits. The tunnel exiting ends the process even with the pipe open, with code 0.
+  - Unfrozen, the pipe closing ends the process as before.
+  - A tunnel watch that ends without seeing an exit is a gap, not an exit, as in Go's `hold_windows.go`. So a frozen broker whose watch failed keeps waiting, as Go's does.
+  - A session thread that ends without reporting (a panic) ends the process with an error. No test reaches either case.
+- **ATTACH:** a malformed one ends the session with `malformed attach`.
+  - Its path must be admitted by the shredder: an absolute path to an existing entry directly under an `-attach-root` (repeatable), not a link.
+  - Then the path is attached to the token, and the pid is recorded as launched for it.
+  - A refusal for any reason (path, unknown token, a second path) answers `attach refused`, and the session goes on.
+  - Otherwise ATTACHED answers, with `used=1` when the token had already been used.
+- **CLAIMED and DISPOSED** are written unasked, from the tokens' runtime. The pipe's writing half is shared behind one lock, so a frame is never cut by another (`Pipe`). A write that fails is dropped, since the app may have closed the pipe after a FREEZE.
+
+The session therefore runs on a thread of its own, and the main thread waits for whichever ends the process first: the pipe or the tunnel. So stdin and stdout are taken unlocked.
+
+## Shredding
+
+`shred.rs` follows Go's `infrastructure/shred`:
+- **Admitting a path:** it must be absolute, and its cleaned parent must be one of the roots, compared without regard to case on Windows. Something must exist there that is not a link.
+  - On Windows, a link is any reparse point except a deduplicated file or a Unix socket. That is what Go's `os.Lstat` reports as a symlink or irregular file since Go 1.23 (`os/types_windows.go`). The tag is read with `FindFirstFileW`.
+  - Elsewhere, only a symlink is a link.
+- **Shredding:** every regular file under the path is overwritten with zeros and flushed, links are not followed, and then the path is removed.
+  - A file that cannot be zero-filled fails the try and leaves everything in place.
+  - Tries repeat every 200 ms for 5 s.
+  - A path already gone is done. A path still failing at the deadline is left for the app's next start to clear.
+  - Shredding runs on a thread of its own, since the retries block.
+
 ## What is answered without being carried out
 
-These are answered the way acwbroker answers when the matching part of it is not wired:
-- **FREEZE:** ends the session with `freeze is not supported`.
-- **ATTACH:** answered `attach is not supported`, and the session goes on.
-- **An ISSUE bound to a terminal:** refused with `terminal to bind the token to was not found`. The terminal lookup is macOS-only in acwbroker and has no counterpart here.
+- **An ISSUE bound to a terminal:** refused with `terminal to bind the token to was not found`. The terminal lookup is macOS-only in acwbroker and is left to #68.
 
 Several parts of acwbroker are absent:
 - Memory sealing of held credentials. Credentials are held in zeroizing buffers instead.
@@ -48,7 +78,7 @@ Several parts of acwbroker are absent:
 - The log file.
 - The legacy RSA host key.
 
-`-logpath`, `-profile`, `-attach-root` and `-unsafe-no-harden` are accepted, as Go's `flag` package accepts them, and change nothing. `-dial-timeout` bounds the upstream TCP connect, read as Go's `time.ParseDuration` reads it. The SSH side is in `broker-relay.md`. Token lifetime and caller checks are in `broker-tokens.md`. Key credentials (#61), and FREEZE, ATTACH, CLAIMED and DISPOSED (#63), are still to come.
+`-logpath`, `-profile` and `-unsafe-no-harden` are accepted, as Go's `flag` package accepts them, and change nothing. `-dial-timeout` bounds the upstream TCP connect, read as Go's `time.ParseDuration` reads it. `-attach-root` names the roots ATTACH paths may be under. The SSH side is in `broker-relay.md`. Token lifetime and caller checks are in `broker-tokens.md`. Key credentials (#61) are still to come.
 
 ## The host key file
 

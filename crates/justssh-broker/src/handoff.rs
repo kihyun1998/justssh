@@ -23,6 +23,9 @@ pub enum Kind {
     Error = 0x05,
     Freeze = 0x07,
     Attach = 0x08,
+    Attached = 0x09,
+    Claimed = 0x0a,
+    Disposed = 0x0b,
 }
 
 pub(crate) const TAG_VERSION: u8 = 0x01;
@@ -35,6 +38,7 @@ pub(crate) const TAG_REASON: u8 = 0x31;
 pub(crate) const TAG_TUNNEL_PID: u8 = 0x40;
 pub(crate) const TAG_PATH: u8 = 0x50;
 pub(crate) const TAG_PID: u8 = 0x51;
+pub(crate) const TAG_USED: u8 = 0x52;
 
 /// One frame as read; the payload is zeroed when dropped.
 #[derive(Debug)]
@@ -203,13 +207,22 @@ pub fn decode_freeze(payload: &[u8]) -> Result<u32, Malformed> {
     }
 }
 
-/// Checks an ATTACH payload: a token, and a path that is not empty, a pid that is not zero, or
-/// both.
-pub fn decode_attach(payload: &[u8]) -> Result<(), Malformed> {
+/// What an ATTACH hands over: the token's path, the process launched to use it, or both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Attachment {
+    pub token: Zeroizing<String>,
+    pub path: Option<String>,
+    pub pid: Option<u32>,
+}
+
+/// An ATTACH payload: a token, and a path that is not empty, a pid that is not zero, or both.
+pub fn decode_attach(payload: &[u8]) -> Result<Attachment, Malformed> {
     let rs = records(payload, &[TAG_TOKEN, TAG_PATH, TAG_PID])?;
-    if find(&rs, TAG_TOKEN).is_none_or(<[u8]>::is_empty) {
-        return Err(Malformed);
-    }
+    let token = match find(&rs, TAG_TOKEN) {
+        Some(t) if !t.is_empty() => Zeroizing::new(String::from_utf8_lossy(t).into_owned()),
+        _ => return Err(Malformed),
+    };
     let path = find(&rs, TAG_PATH);
     if path.is_some_and(<[u8]>::is_empty) {
         return Err(Malformed);
@@ -224,5 +237,25 @@ pub fn decode_attach(payload: &[u8]) -> Result<(), Malformed> {
     if path.is_none() && pid.is_none() {
         return Err(Malformed);
     }
-    Ok(())
+    Ok(Attachment {
+        token,
+        path: path.map(|p| String::from_utf8_lossy(p).into_owned()),
+        pid,
+    })
+}
+
+/// An ATTACHED payload: empty, or saying the token had already been used.
+pub fn attached(used: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    if used {
+        record(&mut out, TAG_USED, &[1]);
+    }
+    out
+}
+
+/// A CLAIMED or DISPOSED payload naming `pid`.
+pub fn pid(pid: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    record(&mut out, TAG_PID, &pid.to_be_bytes());
+    out
 }

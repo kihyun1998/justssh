@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use crate::caller::{Caller, Owner};
+use crate::caller::{Caller, Owner, ProcessImage};
 use crate::rule::ImageMetadata;
 use crate::tokens::{Held, Hold};
 
@@ -23,6 +23,11 @@ pub fn own_user() -> Option<String> {
 
 pub fn parent() -> Option<u32> {
     None
+}
+
+/// The processes of a session: never listed here.
+pub fn candidates(_session: Option<u32>) -> Result<Vec<ProcessImage>, String> {
+    Err(UNSUPPORTED.to_owned())
 }
 
 pub fn metadata(_path: &str) -> Result<ImageMetadata, String> {

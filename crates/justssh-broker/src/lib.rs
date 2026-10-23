@@ -9,4 +9,5 @@ pub mod issue;
 pub mod peer;
 pub mod rule;
 pub mod session;
+pub mod shred;
 pub mod tokens;

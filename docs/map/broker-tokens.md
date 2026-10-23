@@ -15,7 +15,7 @@ Who may present a token and for how long, in the minimal broker. The code is in 
 
 A refusal before the token leaves the token usable.
 
-Go's first check, the freeze, is #63's.
+The freeze comes before all of them: frozen tokens refuse everything (#63).
 
 The pin rules have four phases (Go `pinLocked`). A terminal-bound token first requires the caller to descend from one of the terminal's holders, by pid and start time.
 1. Nothing has used the token. The window (60 s) still applies, and the caller claims the token.
@@ -45,6 +45,30 @@ Go fails the dial of a credential disposed of between the judgement and the dial
 The timers run on the runtime `Tokens::new` is given. Each deadline is fixed when the timer is set. A deadline read when the task first ran came out late by however long the task waited to run. The four tests of idle, admission and window disposal failed on that before it was fixed (measured on #62).
 
 Go's tests move a clock while its timers run in real time. So a token presented after its window, before the timer fires, is refused as expired and removed then. `tests/tokens.rs` reaches that case with `Bench::without_timers`, whose timers run on a runtime nothing drives.
+
+## Freezing, attached paths and launched processes
+
+These follow Go's `registry.go` (#63).
+
+- **Freezing:** every authorization is refused from then on, and every credential is wiped by dropping its zeroizing buffers. Every attached path is shredded.
+  - No token is disposed of. Open connections go on, and the tokens' timers and watches still end them.
+- **Attached paths:** a path attached to a token is handed to the shredder, once, at whichever comes first:
+  - the token's first use;
+  - its expiry (by its timer, or when presented after its window);
+  - its disposal;
+  - a freeze.
+
+  A path attached to a token already used, or while frozen, is handed over at once. A second path for one token is refused.
+- **Launched processes:** each process the app reports for a token is told CLAIMED when the token is first used, or DISPOSED when the token is disposed of before its first use, and never both.
+  - The report is answered "already used", and nothing is recorded, when the token was used.
+  - A reported process is watched while the token is unused, unless frozen.
+  - When the last process watched exits, the cut-off is fixed: when the first of them exited.
+  - Then the processes of this session (`Peer::candidates`) are read. Those that the token's rule admits, that are not the one that exited, and that did not start after the cut-off are watched in its place. When there are none, the token is disposed of.
+  - The token is left to its window when it has no rule, when there is no process list, or when a process named like the program cannot be read.
+  - The first use stops these watches.
+- **When callbacks run:** CLAIMED, DISPOSED and shredding are handed to the tokens' runtime rather than run under the lock, as Go hands them to goroutines.
+
+The cut-off and a process's start are wall-clock times (`SystemTime`), where the timers use the runtime's clock. A process's start is the operating system's, so the cut-off must be on the same clock.
 
 ## The caller rule
 
@@ -78,7 +102,6 @@ CI runs on Ubuntu, so the Windows code is linted there with `--target x86_64-pc-
 
 ## Not here
 
-- The freeze, the processes the app reports with ATTACH and their watch before use, CLAIMED and DISPOSED, and shredding are #63's.
 - The verdict (in-tree, out-of-tree, unmeasured), the admission branch and the reasons for a disposal are only logged in Go, and the minimal broker has no log yet (#66).
 - On macOS, Go measures callers with libproc and resolves a terminal binding (0x17) to the processes holding it. That is left to a follow-up, by the maintainer's choice on #62. Meanwhile the pipe refuses a terminal-bound ISSUE (`handoff-pipe.md`), as Go does wherever the lookup is missing.
 
@@ -87,3 +110,9 @@ CI runs on Ubuntu, so the Windows code is linted there with `--target x86_64-pc-
 `tests/tokens.rs` ports acwbroker's tests of the pin rules, admission, the admission window, disposal, the owner, session and user checks and their order, terminal binding, the caller rule, a failed watch, authorisation, issuing and the shell policy. It also ports the ancestry walk tests. Mutating each rule turned its test red (measured on #62), except the two guards above.
 
 Against acwbroker's blackbox, `TestATokenIsGoneOnceTheProgramThatClaimedItExits` passes with the real measurement: plink is pinned, watched, and its exit disposes of the token.
+
+#63 adds acwbroker's tests of attaching, claiming, freezing, launched processes and disposal before use. The session's FREEZE, ATTACH and unasked frames are tested in process (`tests/session.rs`), and shredding against real files (`tests/shred.rs`):
+- A hard link outside the root shows the file was zeroed before it was removed.
+- A file held open without sharing shows the retries (Windows only).
+
+Every rule's mutation turned a test red (measured on #63). The absolute-path check and the zero-fill each needed a test of their own for that.

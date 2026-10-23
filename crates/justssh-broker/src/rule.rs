@@ -86,8 +86,25 @@ pub fn admits(
     }
 }
 
+/// Whether an executable called `name` could be `rule`'s program: its file name is the rule
+/// path's or one of the extra paths', in any case.
+pub fn named_like(rule: &Rule, name: &str) -> bool {
+    std::iter::once(&rule.path)
+        .chain(&rule.extra_paths)
+        .filter(|p| !p.is_empty())
+        .any(|p| {
+            let p = String::from_utf8_lossy(p);
+            let base = p.rsplit(is_separator).next().unwrap_or("");
+            fold_eq(base, name)
+        })
+}
+
 fn same_path(a: &str, b: &str) -> bool {
-    let (a, b) = (clean(a), clean(b));
+    fold_eq(&clean(a), &clean(b))
+}
+
+/// Whether `a` and `b` are equal without regard to case.
+pub(crate) fn fold_eq(a: &str, b: &str) -> bool {
     a.chars()
         .flat_map(char::to_lowercase)
         .eq(b.chars().flat_map(char::to_lowercase))
@@ -119,7 +136,7 @@ fn volume(path: &str) -> usize {
 }
 
 /// `path` cleaned lexically as Go's `filepath.Clean` cleans a Windows path.
-fn clean(path: &str) -> String {
+pub(crate) fn clean(path: &str) -> String {
     let v = volume(path);
     let (vol, rest) = path.split_at(v);
     let vol = vol.replace('/', "\\");
@@ -150,7 +167,7 @@ fn clean(path: &str) -> String {
 }
 
 /// Everything in `path` but its last element, cleaned, as Go's `filepath.Dir` gives it.
-fn dir(path: &str) -> String {
+pub(crate) fn dir(path: &str) -> String {
     let v = volume(path);
     let end = path[v..].rfind(is_separator).map_or(v, |i| v + i + 1);
     let d = clean(&path[v..end]);
