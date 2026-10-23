@@ -83,4 +83,9 @@ With #60 these two pass as well. Built without it, the broker fails both:
 - `TestATokenWithoutFileTransferRefusesSFTPAndSCPAndKeepsTheShell`
 - `TestOneShellPerTokenAcrossItsConnections`
 
-With #62, `TestATokenIsGoneOnceTheProgramThatClaimedItExits` passes as well. The five that still fail wait on #61 (two) and #63 (three) (measured on #62).
+With #62, `TestATokenIsGoneOnceTheProgramThatClaimedItExits` passes as well. With #63, so do these three:
+- `TestAFrozenBrokerRefusesIssuesOutlivesThePipeAndEndsWithTheTunnel`
+- `TestTheFirstUseOfAnAttachedTokenShredsItsFileAndReportsCLAIMED`
+- `TestAnAttachAfterUseIsAnsweredAsAlreadyUsed`
+
+The two that still fail wait on #61 (measured on #63).
