@@ -48,7 +48,7 @@ Several parts of acwbroker are absent:
 - The log file.
 - The legacy RSA host key.
 
-`-logpath`, `-profile`, `-dial-timeout`, `-attach-root` and `-unsafe-no-harden` are accepted, as Go's `flag` package accepts them, and change nothing. #16 brings SSH serving, the policy, FREEZE, ATTACH, CLAIMED and DISPOSED.
+`-logpath`, `-profile`, `-attach-root` and `-unsafe-no-harden` are accepted, as Go's `flag` package accepts them, and change nothing. `-dial-timeout` bounds the upstream TCP connect, read as Go's `time.ParseDuration` reads it. The SSH side is in `broker-relay.md`. The policy (#60), key credentials (#61), token lifetime and caller checks (#62), and FREEZE, ATTACH, CLAIMED and DISPOSED (#63) are still to come.
 
 ## The host key file
 
@@ -65,4 +65,4 @@ With `ACWBROKER_BIN` set to this binary, these blackbox tests pass:
 - `TestTheHarnessDecodesTheDocumentedLayouts`;
 - `TestAnotherProtocolVersionIsRefusedAndTheBrokerExits`, whose `startBroker` also compares the binary's HELLO with `helloGolden`.
 
-Every other test reaches the first SSH client and waits there. The first is `TestAnIssueForANonLoopbackUpstreamIsRefusedAndTheSessionGoesOn`, where the refusal is answered and the plink after it hangs. That is #16 (measured on #15).
+#59 brought the SSH side, and with it 13 more pass (`broker-relay.md`).

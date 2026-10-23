@@ -12,6 +12,12 @@ justssh.workspace = true
 justssh-keys.workspace = true
 getrandom = { workspace = true, features = ["sys_rng"] }
 zeroize.workspace = true
+subtle.workspace = true
+justssh-tokio = { path = "../justssh-tokio" }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-util"] }
 
 [lints]
 workspace = true

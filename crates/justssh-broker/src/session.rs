@@ -4,10 +4,9 @@
 
 use std::io::{Read, Write};
 
-use zeroize::Zeroizing;
-
 use crate::handoff::{self, Kind, ReadError};
-use crate::issue::{self, Issue, IssueError};
+use crate::issue::{self, IssueError};
+use crate::tokens::Tokens;
 
 /// Why the session ended other than by the pipe closing between frames.
 #[derive(Debug)]
@@ -19,13 +18,6 @@ pub enum End {
     Refused(&'static str),
     /// Writing a frame failed.
     Write(std::io::Error),
-}
-
-/// The tokens issued, each with its credential.
-#[derive(Debug, Default)]
-#[non_exhaustive]
-pub struct Tokens {
-    pub issued: Vec<(Zeroizing<String>, Issue)>,
 }
 
 /// One handoff pipe: frames in on `input`, out on `output`.
@@ -76,7 +68,7 @@ impl<R: Read, W: Write> Session<R, W> {
     }
 
     /// Answers requests until the pipe closes between frames, which ends it cleanly.
-    pub fn serve(&mut self, tokens: &mut Tokens) -> Result<(), End> {
+    pub fn serve(&mut self, tokens: &Tokens) -> Result<(), End> {
         loop {
             let frame = match handoff::read_frame(&mut self.input) {
                 Ok(frame) => frame,
@@ -89,8 +81,7 @@ impl<R: Read, W: Write> Session<R, W> {
                         self.fail("terminal to bind the token to was not found")?;
                     }
                     Ok(issue) => {
-                        let token = mint(tokens);
-                        tokens.issued.push((token.clone(), issue));
+                        let token = tokens.issue(issue);
                         self.write(Kind::Token, &handoff::token(&token))?;
                     }
                     Err(IssueError::NotLoopback) => {
@@ -111,22 +102,6 @@ impl<R: Read, W: Write> Session<R, W> {
                 },
                 _ => return Err(self.refuse("unknown frame kind")),
             }
-        }
-    }
-}
-
-/// A token of 16 random bytes in lowercase hex, not one already issued.
-fn mint(tokens: &Tokens) -> Zeroizing<String> {
-    loop {
-        let mut bytes = Zeroizing::new([0u8; 16]);
-        getrandom::fill(&mut bytes[..]).expect("system random number generator");
-        let mut token = Zeroizing::new(String::with_capacity(32));
-        for b in bytes.iter() {
-            token.push(char::from(b"0123456789abcdef"[usize::from(b >> 4)]));
-            token.push(char::from(b"0123456789abcdef"[usize::from(b & 15)]));
-        }
-        if !tokens.issued.iter().any(|(t, _)| *t == token) {
-            return token;
         }
     }
 }
