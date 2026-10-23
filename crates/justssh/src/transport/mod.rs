@@ -363,6 +363,7 @@ impl Transport {
         for step in steps {
             match step {
                 Step::Send(m) => self.send(&m),
+                Step::SendPacket(p) => self.send_framed(p),
                 Step::Emit(a) => self.actions.push(a),
                 Step::Fail(reason, error) => return self.fail(reason, error),
             }
@@ -1330,8 +1331,15 @@ impl Transport {
 
 /// `payload` after [`packet::HEADER`] bytes left for its frame, with room for the rest.
 fn framed(payload: &[u8]) -> Vec<u8> {
-    let mut packet = Vec::with_capacity(packet::HEADER + payload.len() + packet::TRAILER);
-    packet.resize(packet::HEADER, 0);
+    let mut packet = packet_buffer(payload.len());
     packet.extend_from_slice(payload);
+    packet
+}
+
+/// A packet buffer holding the [`packet::HEADER`] bytes its frame takes, with room after them
+/// for a payload of `payload` bytes and the padding and MAC.
+pub(crate) fn packet_buffer(payload: usize) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(packet::HEADER + payload + packet::TRAILER);
+    packet.resize(packet::HEADER, 0);
     packet
 }

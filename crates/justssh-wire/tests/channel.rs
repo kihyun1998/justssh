@@ -111,3 +111,22 @@ fn extended_data_layout_matches_rfc_4254() {
         vec![95, 0, 0, 0, 5, 0, 0, 0, 1, 0, 0, 0, 3, b'e', b'r', b'r']
     );
 }
+
+proptest! {
+    #[test]
+    fn data_encoded_from_its_parts_is_the_message_encoded(
+        recipient in any::<u32>(),
+        code in any::<u32>(),
+        data in bytes(),
+        before in bytes(),
+    ) {
+        let mut out = before.clone();
+        ChannelData::encode_from(recipient, &data, &mut out);
+        let message = Message::ChannelData(ChannelData::new(recipient, data.clone())).encode();
+        prop_assert_eq!(out, [before.clone(), message].concat());
+        let mut out = before.clone();
+        ChannelExtendedData::encode_from(recipient, code, &data, &mut out);
+        let message = Message::ChannelExtendedData(ChannelExtendedData::new(recipient, code, data)).encode();
+        prop_assert_eq!(out, [before, message].concat());
+    }
+}

@@ -207,6 +207,9 @@ impl ChannelInfo {
 /// One thing the channel table wants done.
 pub(crate) enum Step {
     Send(Message),
+    /// A payload already written after the room its packet's frame takes
+    /// ([`packet_buffer`](crate::transport::packet_buffer)).
+    SendPacket(Vec<u8>),
     Emit(Action),
     Fail(DisconnectReason, Error),
 }
@@ -933,15 +936,17 @@ fn flush(c: &mut Channel, steps: &mut Vec<Step>) {
                 if n == 0 {
                     return;
                 }
-                let chunk = bytes[*sent..*sent + n].to_vec();
+                let chunk = &bytes[*sent..*sent + n];
+                let mut packet = crate::transport::packet_buffer(13 + n);
+                match code {
+                    Some(code) => {
+                        ChannelExtendedData::encode_from(c.peer_id, *code, chunk, &mut packet)
+                    }
+                    None => ChannelData::encode_from(c.peer_id, chunk, &mut packet),
+                }
                 *sent += n;
                 c.peer_window -= n as u32;
-                steps.push(Step::Send(match code {
-                    Some(code) => Message::ChannelExtendedData(ChannelExtendedData::new(
-                        c.peer_id, *code, chunk,
-                    )),
-                    None => Message::ChannelData(ChannelData::new(c.peer_id, chunk)),
-                }));
+                steps.push(Step::SendPacket(packet));
                 if *sent == bytes.len() {
                     c.queue.pop_front();
                 }

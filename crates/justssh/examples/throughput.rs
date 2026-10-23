@@ -76,13 +76,25 @@ fn pair() -> (Server, Client, justssh::ChannelId) {
 fn endpoints() -> (Duration, Duration, Duration, Duration, (usize, usize)) {
     let (mut server, mut client, channel) = pair();
     let chunk = vec![0x5a; CHUNK];
-    let started = Instant::now();
-    let mut packets = Vec::with_capacity(TOTAL / CHUNK);
+    // What the client is given comes from a second pair with the same keys, so that the timed
+    // sending can drop each buffer once counted, as an adapter does once it has written it.
+    let mut wire = Vec::with_capacity(TOTAL + TOTAL / 16);
+    let (mut twin, _, twin_channel) = pair();
     for _ in 0..TOTAL / CHUNK {
-        packets.extend(writes(server.channel_data(channel, &chunk)));
+        for packet in writes(twin.channel_data(twin_channel, &chunk)) {
+            wire.extend_from_slice(&packet);
+        }
+    }
+    let started = Instant::now();
+    let mut sent_bytes = 0;
+    for _ in 0..TOTAL / CHUNK {
+        sent_bytes += writes(server.channel_data(channel, &chunk))
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>();
     }
     let sent = started.elapsed();
-    let wire = packets.concat();
+    assert_eq!(sent_bytes, wire.len());
     let payload =
         justssh_wire::Message::ChannelData(justssh_wire::ChannelData::new(0, chunk.clone()))
             .encode();

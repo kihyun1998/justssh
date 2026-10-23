@@ -791,6 +791,14 @@ impl ChannelData {
     pub fn new(recipient: u32, data: Vec<u8>) -> Self {
         ChannelData { recipient, data }
     }
+
+    /// Appends to `out` the payload of a `ChannelData` to `recipient` carrying `data`, as
+    /// [`Message::encode`] writes it, without the message owning the data.
+    pub fn encode_from(recipient: u32, data: &[u8], out: &mut Vec<u8>) {
+        let mut w = Writer::appending(core::mem::take(out));
+        w.u8(number::CHANNEL_DATA).u32(recipient).string(data);
+        *out = w.into_bytes();
+    }
 }
 
 /// `SSH_MSG_CHANNEL_EXTENDED_DATA`; `code` 1 is stderr.
@@ -809,6 +817,17 @@ impl ChannelExtendedData {
             code,
             data,
         }
+    }
+
+    /// Appends to `out` the payload of a `ChannelExtendedData` as [`ChannelData::encode_from`]
+    /// does.
+    pub fn encode_from(recipient: u32, code: u32, data: &[u8], out: &mut Vec<u8>) {
+        let mut w = Writer::appending(core::mem::take(out));
+        w.u8(number::CHANNEL_EXTENDED_DATA)
+            .u32(recipient)
+            .u32(code)
+            .string(data);
+        *out = w.into_bytes();
     }
 }
 
