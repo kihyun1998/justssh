@@ -1408,7 +1408,7 @@ fn a_caller_missing_from_the_snapshot_is_unreadable_and_measured_as_failed() {
     assert_eq!(pids(&t, 200), (vec![], Stop::Unreadable));
     let mut owner = Owner::default();
     owner.pid = 200;
-    let c = Caller::measure(owner, Some(Ok(&t)));
+    let c = Caller::measure(owner, Some(Ok(&t)), false);
     assert!(c.error.is_some() && c.ancestry.is_empty() && !c.unowned());
 }
 
@@ -1422,7 +1422,7 @@ fn the_lineage_carries_each_links_start_time_and_stops_at_a_recycled_parent() {
     ]);
     let mut owner = Owner::default();
     owner.pid = 400;
-    let c = Caller::measure(owner, Some(Ok(&t)));
+    let c = Caller::measure(owner, Some(Ok(&t)), false);
     assert_eq!(c.ancestry, [400, 300]);
     assert_eq!(
         c.lineage,
@@ -1902,4 +1902,207 @@ async fn a_frozen_tokens_launch_is_recorded_and_not_watched() {
     b.tokens.revoke(&token);
     settle().await;
     assert_eq!(told.unclaimed(), [LAUNCHER]);
+}
+
+// dispose_test.go and holdfail_test.go: what is reported
+
+/// The disposals and failed watches the tokens reported, in order.
+#[derive(Default)]
+struct Reports {
+    disposed: Mutex<Vec<(String, usize)>>,
+    hold_failed: Mutex<Vec<(u32, String)>>,
+}
+
+fn reported(f: impl FnOnce(&mut Config)) -> (Bench, Arc<Reports>) {
+    let r = Arc::new(Reports::default());
+    let (d, h) = (r.clone(), r.clone());
+    let b = Bench::with(move |c| {
+        c.disposed = Some(Arc::new(move |why, live| {
+            d.disposed.lock().unwrap().push((why.to_owned(), live))
+        }));
+        c.hold_failed = Some(Arc::new(move |pid, why| {
+            h.hold_failed.lock().unwrap().push((pid, why.to_owned()))
+        }));
+        f(c);
+    });
+    (b, r)
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_disposal_reports_why_and_how_many_are_left_and_an_expiry_reports_nothing() {
+    let hold = Arc::new(FakeHold::default());
+    let processes = Arc::new(Processes::default());
+    let (h, ps) = (hold.clone(), processes.clone());
+    let (b, r) = reported(move |c| {
+        c.idle = Duration::from_millis(20);
+        c.peer.hold = Some(h);
+        c.peer.candidates = Some(Arc::new(move || ps.0.lock().unwrap().clone()));
+    });
+    let keep = b.issue();
+    let _kept = b.connect(&keep, &in_tree(&[9]));
+
+    let idle = b.issue();
+    drop(b.connect(&idle, &in_tree(&[WINSCP])));
+    b.at(Duration::from_millis(21)).await;
+
+    let asked = b.issue();
+    b.tokens.revoke(&asked);
+
+    let exited = b.issue();
+    let _open = b.connect(&exited, &out_of_tree(PUTTY));
+    hold.exit(PUTTY);
+    settle().await;
+
+    let gone = ruled(&b, &rule_records(1, PUTTY_IMAGE, None, b""));
+    b.tokens.launched(&gone, LAUNCHER).unwrap();
+    hold.exit(LAUNCHER);
+    settle().await;
+
+    let _expired = b.issue();
+    b.at(DEFAULT_WINDOW + Duration::from_secs(1)).await;
+    let refused = b.issue();
+    b.at(DEFAULT_WINDOW * 2 + Duration::from_secs(2)).await;
+    drop(refused);
+
+    assert_eq!(
+        *r.disposed.lock().unwrap(),
+        [
+            ("idle".to_owned(), 1),
+            ("requested".to_owned(), 1),
+            ("program exited".to_owned(), 1),
+            ("program gone before use".to_owned(), 1),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn admission_closing_with_nothing_connected_reports_it() {
+    let (b, r) = reported(|c| c.idle = Duration::from_secs(3600));
+    let t = b.issue();
+    drop(b.connect(&t, &in_tree(&[WINSCP])));
+    b.at(DEFAULT_ADMIT + Duration::from_millis(1)).await;
+    assert_eq!(
+        *r.disposed.lock().unwrap(),
+        [("admission closed".to_owned(), 0)]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_hold_is_reported_and_a_successful_one_is_not() {
+    let hold = Arc::new(FakeHold {
+        fail: vec![PUTTY],
+        ..FakeHold::default()
+    });
+    let h = hold.clone();
+    let (mut b, r) = reported(move |c| c.peer.hold = Some(h));
+    let t = b.issue();
+    b.admit(&t, &out_of_tree(PUTTY));
+    let other = b.issue();
+    b.admit(&other, &out_of_tree(SECURECRT));
+    settle().await;
+    assert_eq!(
+        *r.hold_failed.lock().unwrap(),
+        [(PUTTY, "no such process".to_owned())]
+    );
+}
+
+// chain_test.go and peer.go: how a caller reads in a log line
+
+#[test]
+fn a_caller_reads_as_its_owner_then_its_chain_and_why_it_stopped() {
+    let t = table(&[(100, 0, at(0)), (200, 100, at(1)), (300, 200, at(2))]);
+    let mut owner = Owner::default();
+    owner.pid = 300;
+    owner.image_path = r"C:\x\fzsftp.exe".to_owned();
+    owner.session = Some(1);
+    let c = Caller::measure(owner.clone(), Some(Ok(&t)), false);
+    assert_eq!(
+        c.described,
+        r"pid=300 image=C:\x\fzsftp.exe session=1 chain=300<-200<-100 stop=no-parent"
+    );
+
+    let mut named = FakeTable(t.0.clone());
+    named.0.get_mut(&200).unwrap().name = "filezilla.exe".to_owned();
+    owner.user = Some("S-1-5-21-1".to_owned());
+    let c = Caller::measure(owner.clone(), Some(Ok(&named)), true);
+    assert_eq!(
+        c.described,
+        r"pid=300 image=C:\x\fzsftp.exe session=1 user=S-1-5-21-1 chain=300<-200(filezilla.exe)<-100 stop=no-parent"
+    );
+
+    owner.user = None;
+    let c = Caller::measure(owner.clone(), None, true);
+    assert_eq!(
+        c.described,
+        r"pid=300 image=C:\x\fzsftp.exe session=1 user=?"
+    );
+
+    let c = Caller::measure(
+        owner.clone(),
+        Some(Err("snapshot failed".to_owned())),
+        false,
+    );
+    assert_eq!(
+        c.described,
+        r"pid=300 image=C:\x\fzsftp.exe session=1 chain=? stop=unreadable (snapshot failed)"
+    );
+
+    let empty = table(&[]);
+    let c = Caller::measure(owner.clone(), Some(Ok(&empty)), false);
+    assert_eq!(
+        c.described,
+        r"pid=300 image=C:\x\fzsftp.exe session=1 chain=? stop=unreadable (fake: no such pid)"
+    );
+
+    let c = Caller::measure(Owner::unmeasured("peer: no socket owns it"), None, true);
+    assert_eq!(
+        c.described,
+        "pid=? image=? (peer: no socket owns it) user=?"
+    );
+
+    let recycled = table(&[(100, 0, at(0)), (200, 100, at(9)), (300, 200, at(2))]);
+    owner.session = None;
+    let c = Caller::measure(owner, Some(Ok(&recycled)), false);
+    assert_eq!(
+        c.described,
+        r"pid=300 image=C:\x\fzsftp.exe chain=300 stop=stale-parent"
+    );
+}
+
+#[test]
+fn the_verdict_classifies_the_caller() {
+    let tree = |a: &[u32]| {
+        let mut c = Caller::new(a[0]);
+        c.ancestry = a.to_vec();
+        c
+    };
+    assert_eq!(tree(&[APP]).verdict(APP), "in-tree");
+    assert_eq!(tree(&[900, APP]).verdict(APP), "in-tree");
+    assert_eq!(tree(&[901, 900, APP]).verdict(APP), "in-tree");
+    assert_eq!(tree(&[14664, 10356]).verdict(APP), "out-of-tree");
+    let mut failed = Caller::new(900);
+    failed.error = Some("no such process".to_owned());
+    assert_eq!(failed.verdict(APP), "unmeasured");
+    assert_eq!(Caller::new(900).verdict(APP), "unmeasured");
+    assert_eq!(tree(&[900, 0]).verdict(0), "out-of-tree");
+}
+
+#[test]
+fn a_refusal_reads_as_acwbroker_words_it() {
+    assert_eq!(
+        Refusal::UnknownToken.to_string(),
+        "acwbroker: no live token matches the presented password"
+    );
+    assert_eq!(
+        Refusal::NotTheProgram("x is not y".to_owned()).to_string(),
+        "acwbroker: the caller is not the program the token was issued for: x is not y"
+    );
+    assert_eq!(
+        Refusal::Frozen.to_string(),
+        "acwbroker: frozen; no new connections"
+    );
+    assert_eq!(
+        AttachError::AlreadyAttached.to_string(),
+        "acwbroker: the token already has a path attached"
+    );
 }

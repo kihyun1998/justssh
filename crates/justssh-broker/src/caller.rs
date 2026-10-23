@@ -23,6 +23,8 @@ pub struct Caller {
     pub session: Option<u32>,
     /// The account's SID, when it was read.
     pub user: Option<String>,
+    /// The measurement as a log line says it: the owner, then the ancestry and why it stopped.
+    pub described: String,
 }
 
 /// A process named so that a reused pid cannot match it: whatever takes the pid later starts
@@ -137,7 +139,60 @@ impl ProcessInfo {
     }
 }
 
+impl Stop {
+    fn as_str(self) -> &'static str {
+        match self {
+            Stop::NoParent => "no-parent",
+            Stop::ParentGone => "parent-gone",
+            Stop::StaleParent => "stale-parent",
+            Stop::Cycle => "cycle",
+            Stop::Depth => "depth",
+            Stop::Unreadable => "unreadable",
+        }
+    }
+}
+
+impl Chain {
+    /// The chain for a log line: `chain=` and each pid with its name, nearest first, then why
+    /// it stopped.
+    pub fn render(&self) -> String {
+        if self.stop == Stop::Unreadable {
+            let e = self.error.as_deref().unwrap_or("");
+            return format!("chain=? stop=unreadable ({e})");
+        }
+        let links: Vec<String> = self
+            .links
+            .iter()
+            .map(|l| match l.name.as_str() {
+                "" => l.pid.to_string(),
+                name => format!("{}({name})", l.pid),
+            })
+            .collect();
+        format!("chain={} stop={}", links.join("<-"), self.stop.as_str())
+    }
+}
+
 impl Owner {
+    /// The owner for a log line: its pid and image, or why they were not read, then its
+    /// session, and its account where the platform reads accounts.
+    pub fn render(&self, reads_users: bool) -> String {
+        let mut s = match &self.error {
+            Some(e) => format!("pid=? image=? ({e})"),
+            None => format!("pid={} image={}", self.pid, self.image_path),
+        };
+        if let Some(id) = self.session {
+            s += &format!(" session={id}");
+        }
+        if reads_users {
+            s += match &self.user {
+                Some(sid) => format!(" user={sid}"),
+                None => " user=?".to_owned(),
+            }
+            .as_str();
+        }
+        s
+    }
+
     /// An owner that could not be measured at all.
     pub fn unmeasured(error: impl Into<String>) -> Self {
         Owner {
@@ -201,9 +256,15 @@ impl Caller {
     }
 
     /// The caller `owner` describes, with the ancestry `table` gives it. Without a table the
-    /// ancestry is left unmeasured.
-    pub fn measure(owner: Owner, table: Option<Result<&dyn ProcessTable, String>>) -> Self {
+    /// ancestry is left unmeasured. `reads_users` says whether the platform measures accounts.
+    pub fn measure(
+        owner: Owner,
+        table: Option<Result<&dyn ProcessTable, String>>,
+        reads_users: bool,
+    ) -> Self {
+        let described = owner.render(reads_users);
         let mut c = Caller {
+            described,
             pid: owner.pid,
             image_path: owner.image_path,
             error: owner.error,
@@ -216,9 +277,13 @@ impl Caller {
         }
         match table {
             None => {}
-            Some(Err(e)) => c.error = Some(e),
+            Some(Err(e)) => {
+                c.described += &format!(" chain=? stop=unreadable ({e})");
+                c.error = Some(e);
+            }
             Some(Ok(t)) => {
                 let chain = walk(t, c.pid);
+                c.described += &format!(" {}", chain.render());
                 if chain.stop == Stop::Unreadable {
                     c.error = chain.error;
                     return c;
@@ -232,6 +297,18 @@ impl Caller {
             }
         }
         c
+    }
+
+    /// Where the caller came from, against the tree of `app`: `in-tree`, `out-of-tree`, or
+    /// `unmeasured` when its ancestry could not be read.
+    pub fn verdict(&self, app: u32) -> &'static str {
+        if !self.walked() {
+            "unmeasured"
+        } else if self.descends_from(app) {
+            "in-tree"
+        } else {
+            "out-of-tree"
+        }
     }
 
     fn walked(&self) -> bool {

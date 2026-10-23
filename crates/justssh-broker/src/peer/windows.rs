@@ -14,8 +14,9 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_REPARSE_POINT, FindClose, FindFirstFileW, GetFileVersionInfoSizeW,
-    GetFileVersionInfoW, GetLongPathNameW, VerQueryValueW, WIN32_FIND_DATAW,
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FindClose, FindFirstFileW,
+    GetFileInformationByHandle, GetFileVersionInfoSizeW, GetFileVersionInfoW, GetLongPathNameW,
+    VerQueryValueW, WIN32_FIND_DATAW,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -26,12 +27,18 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
     WaitForSingleObject,
 };
+use windows_sys::Win32::System::Time::{
+    GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
+};
 
 use crate::caller::{Caller, Owner, ProcessImage, ProcessInfo, ProcessTable};
 use crate::rule::ImageMetadata;
 use crate::tokens::{Held, Hold};
 
 const AF_INET: u32 = 2;
+/// What `GetTimeZoneInformation` returns while standard time, or daylight saving, is in force.
+const TIME_ZONE_ID_STANDARD: u32 = 1;
+const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
 const AF_INET6: u32 = 23;
 /// The longest path Windows reports, in UTF-16 units.
 const MAX_LONG_PATH: usize = 32768;
@@ -72,6 +79,7 @@ pub fn probe(addr: SocketAddr) -> Caller {
                 .map(|t| t as &dyn ProcessTable)
                 .map_err(Clone::clone),
         ),
+        true,
     )
 }
 
@@ -441,6 +449,40 @@ fn query_string(buf: &[u8], sub: &str) -> String {
     let s = unsafe { std::slice::from_raw_parts(p.cast::<u16>(), n as usize) };
     let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
     String::from_utf16_lossy(&s[..end])
+}
+
+/// Whether `held` is the file now at `path`: the same volume and file index.
+pub fn same_file(held: &std::fs::File, path: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    let at = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(0x1 | 0x2 | 0x4)
+        .open(path)?;
+    let id = |f: &std::fs::File| -> std::io::Result<(u32, u32, u32)> {
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
+    };
+    Ok(id(held)? == id(&at)?)
+}
+
+/// This machine's offset from UTC now, in minutes, daylight saving included.
+pub fn utc_offset_minutes() -> i32 {
+    let mut tz = TIME_ZONE_INFORMATION::default();
+    let bias = match unsafe { GetTimeZoneInformation(&mut tz) } {
+        TIME_ZONE_ID_DAYLIGHT => tz.Bias + tz.DaylightBias,
+        TIME_ZONE_ID_STANDARD => tz.Bias + tz.StandardBias,
+        TIME_ZONE_ID_INVALID => return 0,
+        _ => tz.Bias,
+    };
+    -bias
 }
 
 /// The reparse tag of what is at `path`, when it is a reparse point and can be read.

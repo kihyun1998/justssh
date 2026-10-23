@@ -6,6 +6,8 @@ pub mod caller;
 pub mod handoff;
 pub mod hostkey;
 pub mod issue;
+pub mod log;
+pub mod logfile;
 pub mod peer;
 pub mod rule;
 pub mod session;

@@ -12,6 +12,8 @@ use justssh::HostKey;
 use justssh_broker::broker;
 use justssh_broker::hostkey;
 use justssh_broker::issue::require_loopback;
+use justssh_broker::log::Log;
+use justssh_broker::logfile::{self, LogFile, Tee};
 use justssh_broker::peer;
 use justssh_broker::session::{End, Hooks, Session};
 use justssh_broker::shred::Shredder;
@@ -26,6 +28,8 @@ struct Options {
     host_key: Option<PathBuf>,
     dial_timeout: Duration,
     attach_roots: Vec<PathBuf>,
+    logpath: Option<PathBuf>,
+    profile: Option<String>,
     version: bool,
 }
 
@@ -36,6 +40,8 @@ impl Default for Options {
             host_key: None,
             dial_timeout: Duration::from_secs(15),
             attach_roots: Vec::new(),
+            logpath: None,
+            profile: None,
             version: false,
         }
     }
@@ -88,6 +94,10 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
             "listen" => options.listen = Some(value),
             "host-key" => options.host_key = Some(PathBuf::from(value)),
             "attach-root" => options.attach_roots.push(PathBuf::from(value)),
+            "logpath" => {
+                options.logpath = Some(PathBuf::from(value)).filter(|p| !p.as_os_str().is_empty())
+            }
+            "profile" => options.profile = Some(value),
             "dial-timeout" => {
                 options.dial_timeout = duration(&value)
                     .ok_or_else(|| format!("invalid value {value:?} for flag -dial-timeout"))?;
@@ -148,10 +158,36 @@ fn main() -> ExitCode {
     }
 }
 
+/// The process's log: every line to `acwbroker.log` in `dir`, or in the ACRA home, and to
+/// stderr. A file that cannot be opened leaves stderr alone and says so there.
+fn logger(dir: Option<PathBuf>, profile: Option<String>) -> Log {
+    let path = dir
+        .or_else(hostkey::acra_home)
+        .map(|d| d.join(logfile::NAME))
+        .ok_or_else(|| "no ACRA_HOME and no home directory".to_owned());
+    let file = path.and_then(|p| {
+        LogFile::open(&p, logfile::LIMIT, logfile::KEEP)
+            .map_err(|e| format!("open {}: {e}", p.display()))
+    });
+    match file {
+        Ok(file) => Log::new(Tee::new(file, std::io::stderr()), profile),
+        Err(e) => {
+            let log = Log::new(std::io::stderr(), profile);
+            log.warn(
+                "log file unavailable; logging to stderr only",
+                &[("err", e.into())],
+            );
+            log
+        }
+    }
+}
+
 fn run(options: Options) -> Result<(), String> {
+    let log = logger(options.logpath.clone(), options.profile.clone());
     let mut session = Session::new(std::io::stdin(), std::io::stdout());
+    session.set_log(log.clone());
     session.handshake().map_err(|e| format!("{e:?}"))?;
-    let mut config = match peer::config() {
+    let mut config = match peer::config(&log) {
         Ok(config) => config,
         Err(e) => {
             let _ = session.fail("session unavailable");
@@ -193,9 +229,30 @@ fn run(options: Options) -> Result<(), String> {
     let pipe = session.pipe();
     config.unclaimed = Some(Arc::new(move |pid| pipe.disposed(pid)));
     let shred = shredder.clone();
+    let l = log.clone();
     config.shred = Some(Arc::new(move |path| {
-        let shred = shred.clone();
-        std::thread::spawn(move || shred.shred(&path));
+        let (shred, l) = (shred.clone(), l.clone());
+        std::thread::spawn(move || match shred.shred(&path) {
+            Ok(()) => l.info("attached file shredded", &[]),
+            Err(e) => l.warn(
+                "could not shred an attached file; the app's next start clears it",
+                &[("err", e.into())],
+            ),
+        });
+    }));
+    let l = log.clone();
+    config.disposed = Some(Arc::new(move |reason, live| {
+        l.info(
+            "credential disposed",
+            &[("reason", reason.into()), ("live", live.into())],
+        )
+    }));
+    let l = log.clone();
+    config.hold_failed = Some(Arc::new(move |pid, err| {
+        l.warn(
+            "could not watch a pinned process for its exit; its session will not end when it does",
+            &[("pid", pid.into()), ("err", err.into())],
+        )
     }));
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let tokens = Tokens::new(config, runtime.handle().clone());
@@ -211,6 +268,7 @@ fn run(options: Options) -> Result<(), String> {
         tokens.clone(),
         options.dial_timeout,
         Arc::new(peer::probe),
+        log.clone(),
     ));
     let (events, ended) = channel();
     let mut hooks = Freezer {
@@ -219,6 +277,7 @@ fn run(options: Options) -> Result<(), String> {
         shredder,
         runtime: runtime.handle().clone(),
         events: events.clone(),
+        log: log.clone(),
     };
     std::thread::spawn(move || {
         let served = session.serve(&tokens, &mut hooks);
@@ -227,14 +286,19 @@ fn run(options: Options) -> Result<(), String> {
     let result = match ended.recv() {
         Ok(Event::PipeEnded(served, false)) => served.map_err(|e| format!("{e:?}")),
         Ok(Event::PipeEnded(_, true)) => {
+            log.info("the app has let go; staying until the tunnel exits", &[]);
             if ended.iter().all(|e| !matches!(e, Event::TunnelExited)) {
                 loop {
                     std::thread::park();
                 }
             }
+            log.info("the tunnel exited; shutting down", &[]);
             Ok(())
         }
-        Ok(Event::TunnelExited) => Ok(()),
+        Ok(Event::TunnelExited) => {
+            log.info("the tunnel exited; shutting down", &[]);
+            Ok(())
+        }
         Err(_) => Err("the handoff session ended without saying how".to_owned()),
     };
     runtime.shutdown_background();
@@ -255,6 +319,7 @@ struct Freezer {
     shredder: Shredder,
     runtime: Handle,
     events: Sender<Event>,
+    log: Log,
 }
 
 impl Hooks for Freezer {
@@ -264,6 +329,10 @@ impl Hooks for Freezer {
         let held = peer::Holder::default().hold(tunnel)?;
         self.tokens.freeze();
         self.serving.abort();
+        self.log.info(
+            "frozen: no new connections; staying until the tunnel exits",
+            &[("tunnel", tunnel.into())],
+        );
         let events = self.events.clone();
         self.runtime.spawn(async move {
             if held.exited().await {

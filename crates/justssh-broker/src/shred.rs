@@ -36,7 +36,8 @@ impl Shredder {
     }
 
     fn check(&self, path: &str) -> Result<(), io::Error> {
-        let outside = || io::Error::other("the path is not directly under an attach root");
+        let outside =
+            || io::Error::other("acwbroker: the path is not directly under an attach root");
         if !Path::new(path).is_absolute() {
             return Err(outside());
         }
@@ -52,7 +53,7 @@ impl Shredder {
         }
         let meta = fs::symlink_metadata(&cleaned)?;
         if is_link(&cleaned, &meta) {
-            return Err(io::Error::other("the path is a link"));
+            return Err(io::Error::other("acwbroker: the path is a link"));
         }
         Ok(())
     }

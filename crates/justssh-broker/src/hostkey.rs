@@ -8,17 +8,26 @@ use std::path::{Path, PathBuf};
 use justssh::Zeroizing;
 use justssh_keys::KeyFile;
 
-/// `<ACRA home>/.store/acwbroker/hostkey`, the ACRA home being `ACRA_HOME` or else `.acrapoint`
-/// in the user's home directory.
-pub fn default_path() -> Option<PathBuf> {
-    let home = match std::env::var_os("ACRA_HOME").filter(|v| !v.is_empty()) {
-        Some(home) => PathBuf::from(home),
+/// The ACRA home: `ACRA_HOME`, or else `.acrapoint` in the user's home directory.
+pub fn acra_home() -> Option<PathBuf> {
+    match std::env::var_os("ACRA_HOME").filter(|v| !v.is_empty()) {
+        Some(home) => Some(PathBuf::from(home)),
         None => {
             let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-            PathBuf::from(std::env::var_os(var).filter(|v| !v.is_empty())?).join(".acrapoint")
+            let user = std::env::var_os(var).filter(|v| !v.is_empty())?;
+            Some(PathBuf::from(user).join(".acrapoint"))
         }
-    };
-    Some(home.join(".store").join("acwbroker").join("hostkey"))
+    }
+}
+
+/// `<ACRA home>/.store/acwbroker/hostkey`.
+pub fn default_path() -> Option<PathBuf> {
+    Some(
+        acra_home()?
+            .join(".store")
+            .join("acwbroker")
+            .join("hostkey"),
+    )
 }
 
 /// The key at `path`, made there first when there is no file.

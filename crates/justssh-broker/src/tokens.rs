@@ -42,7 +42,18 @@ pub struct Config {
     /// Handed each path attached to a token once the token is used, expires, is disposed of
     /// or the tokens freeze. Without it every attached path is kept.
     pub shred: Option<Shred>,
+    /// Told why each token disposed of was, and how many are left; a token that expired is
+    /// not told.
+    pub disposed: Option<Disposed>,
+    /// Told each pinned process that could not be watched for its exit, and why.
+    pub hold_failed: Option<HoldFailed>,
 }
+
+/// Told why a token was disposed of, and how many tokens are live after it.
+pub type Disposed = Arc<dyn Fn(&str, usize) + Send + Sync>;
+
+/// Told a pinned process that could not be watched, and why.
+pub type HoldFailed = Arc<dyn Fn(u32, &str) + Send + Sync>;
 
 /// Told a process id, on the tokens' runtime.
 pub type Tell = Arc<dyn Fn(u32) + Send + Sync>;
@@ -124,6 +135,54 @@ pub enum AttachError {
     Refused(String),
 }
 
+impl std::fmt::Display for Refusal {
+    /// acwbroker's words for it (`domain/model`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Refusal::Frozen => "frozen; no new connections",
+            Refusal::SessionUnknown => "the caller's Windows session could not be read",
+            Refusal::OtherSession => "the caller runs in another Windows session",
+            Refusal::OwnerUnknown => {
+                "the process owning the caller's connection could not be found"
+            }
+            Refusal::UserUnknown => "the caller's Windows user could not be read",
+            Refusal::OtherUser => "the caller runs as another Windows user",
+            Refusal::UnknownToken => "no live token matches the presented password",
+            Refusal::UsernameMismatch => {
+                "the presented username is not the one bound to this token"
+            }
+            Refusal::NotTheProgram(why) => {
+                return write!(
+                    f,
+                    "acwbroker: the caller is not the program the token was issued for: {why}"
+                );
+            }
+            Refusal::WrongTerminal => {
+                "this caller is not running in the terminal the token was issued for"
+            }
+            Refusal::TokenExpired => "the token expired before anything used it",
+            Refusal::AdmissionClosed => "admission closed",
+            Refusal::CallerNotPinned => "this caller is not the one that claimed the token",
+        };
+        write!(f, "acwbroker: {text}")
+    }
+}
+
+impl std::fmt::Display for AttachError {
+    /// acwbroker's words for it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttachError::UnknownToken => {
+                f.write_str("acwbroker: no live token matches the presented password")
+            }
+            AttachError::AlreadyAttached => {
+                f.write_str("acwbroker: the token already has a path attached")
+            }
+            AttachError::Refused(why) => f.write_str(why),
+        }
+    }
+}
+
 /// Which pin rule let an accepted connection in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -150,6 +209,8 @@ impl Default for Config {
             claimed: None,
             unclaimed: None,
             shred: None,
+            disposed: None,
+            hold_failed: None,
         }
     }
 }
@@ -285,7 +346,7 @@ impl Tokens {
             self.after(c.window, move |t| {
                 let mut issued = t.lock();
                 if issued.find(id).is_some_and(|e| e.first_at.is_none()) {
-                    t.dispose(&mut issued, id);
+                    t.dispose(&mut issued, id, None);
                 }
             })
         });
@@ -460,7 +521,7 @@ impl Tokens {
             }
         }
         if e.launch.is_empty() {
-            self.dispose(&mut issued, id);
+            self.dispose(&mut issued, id, Some("program gone before use"));
         }
     }
 
@@ -489,11 +550,16 @@ impl Tokens {
 
     /// Disposes of token `id`: the processes reported for it are told it went unused, its
     /// path is shredded, its live upstreams are told to close, its timers and watches stop,
-    /// and its token and credential are zeroed as they drop.
-    fn dispose(&self, issued: &mut Issued, id: u64) {
+    /// and its token and credential are zeroed as they drop. `reason`, when there is one, is
+    /// reported with how many tokens are left.
+    fn dispose(&self, issued: &mut Issued, id: u64, reason: Option<&'static str>) {
         let Some(mut e) = issued.remove(id) else {
             return;
         };
+        if let (Some(reason), Some(report)) = (reason, self.0.config.disposed.clone()) {
+            let live = issued.entries.len();
+            self.0.runtime.spawn(async move { report(reason, live) });
+        }
         self.tell(
             self.0.config.unclaimed.as_ref(),
             std::mem::take(&mut e.reported),
@@ -508,6 +574,11 @@ impl Tokens {
         }
     }
 
+    /// The process every program the app launches descends from.
+    pub fn app(&self) -> u32 {
+        self.0.config.app
+    }
+
     /// Disposes of `token` and everything it holds, and says whether there was one.
     pub fn revoke(&self, token: &str) -> bool {
         let mut issued = self.lock();
@@ -519,7 +590,7 @@ impl Tokens {
         else {
             return false;
         };
-        self.dispose(&mut issued, id);
+        self.dispose(&mut issued, id, Some("requested"));
         true
     }
 
@@ -624,7 +695,7 @@ impl Tokens {
         }
         let Some(first) = e.first_at else {
             if !c.window.is_zero() && now - e.issued_at > c.window {
-                self.dispose(issued, id);
+                self.dispose(issued, id, None);
                 return Err(Refusal::TokenExpired);
             }
             e.first_at = Some(now);
@@ -665,8 +736,15 @@ impl Tokens {
                 continue;
             }
             e.pins.push(pid);
-            let Some(Ok(held)) = hold.as_ref().map(|h| h.hold(pid)) else {
-                continue;
+            let held = match hold.as_ref().map(|h| h.hold(pid)) {
+                Some(Ok(held)) => held,
+                Some(Err(why)) => {
+                    if let Some(report) = self.0.config.hold_failed.clone() {
+                        self.0.runtime.spawn(async move { report(pid, &why) });
+                    }
+                    continue;
+                }
+                None => continue,
             };
             let tokens = Arc::downgrade(&self.0);
             let watch = self.0.runtime.spawn(async move {
@@ -690,7 +768,7 @@ impl Tokens {
         e.pins.retain(|&p| p != pid);
         e.alive -= 1;
         if e.alive == 0 {
-            self.dispose(&mut issued, id);
+            self.dispose(&mut issued, id, Some("program exited"));
         }
     }
 
@@ -707,16 +785,16 @@ impl Tokens {
         if e.conns > 0 {
             return;
         }
-        let mut delay = (!c.idle.is_zero()).then_some(c.idle);
+        let mut delay = (!c.idle.is_zero()).then_some((c.idle, "idle"));
         if !c.admit.is_zero()
             && let Some(first) = e.first_at
         {
             let left = (first + c.admit).saturating_duration_since(Instant::now());
-            if delay.is_none_or(|d| left < d) {
-                delay = Some(left);
+            if delay.is_none_or(|(d, _)| left < d) {
+                delay = Some((left, "admission closed"));
             }
         }
-        let Some(delay) = delay else {
+        let Some((delay, reason)) = delay else {
             return;
         };
         if let Some(t) = e.idle.take() {
@@ -725,7 +803,7 @@ impl Tokens {
         e.idle = Some(self.after(delay, move |t| {
             let mut issued = t.lock();
             if issued.find(id).is_some_and(|e| e.conns == 0) {
-                t.dispose(&mut issued, id);
+                t.dispose(&mut issued, id, Some(reason));
             }
         }));
     }
