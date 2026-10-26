@@ -291,3 +291,60 @@ fn claimed_and_disposed_are_written_whole_from_many_threads_and_dropped_on_a_clo
     closed.pipe().claimed(1);
     closed.pipe().disposed(1);
 }
+
+/// A key ISSUE for `key`, with `passphrase` when given.
+fn key_issue(key: &[u8], passphrase: Option<&[u8]>) -> Vec<u8> {
+    let mut p = [
+        rec(0x10, b"key"),
+        rec(0x15, b"srv-7@10.0.0.9"),
+        rec(0x16, b"127.0.0.7:51201"),
+        rec(0x12, key),
+    ]
+    .concat();
+    if let Some(pass) = passphrase {
+        p.extend(rec(0x13, pass));
+    }
+    frame(2, &p)
+}
+
+fn key_fixture(name: &str) -> Vec<u8> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../justssh-keys/tests/keys");
+    std::fs::read(dir.join(name)).unwrap()
+}
+
+#[test]
+fn a_credential_that_cannot_be_read_is_refused_with_its_reason_and_the_session_goes_on() {
+    let (rt, tokens) = setup();
+    let log = Out::default();
+    let hello = frame(1, &handoff::hello(handoff::VERSION));
+    let input = [
+        hello,
+        key_issue(&key_fixture("ed25519-pass"), Some(b"wrong")),
+        key_issue(&key_fixture("ed25519-pass"), Some(b"correct horse")),
+    ]
+    .concat();
+    let out = Out::default();
+    let mut s = Session::new(Cursor::new(input), out.clone());
+    s.set_log(justssh_broker::log::Log::new(log.clone(), None));
+    s.handshake().unwrap();
+    let _entered = rt.enter();
+    assert!(s.serve(&tokens, &mut Fake::default()).is_ok());
+
+    let frames = out.frames();
+    assert_eq!(frames.len(), 2);
+    // acwbroker blackbox `refusalGolden`.
+    let golden = "300000001077726f6e672070617373706872617365310000000101";
+    let hex: String = frames[0].2.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!((frames[0].0, hex.as_str()), (5, golden));
+    assert_eq!(frames[1].0, Kind::Token as u8);
+    assert_eq!(tokens.len(), 1);
+
+    let logged = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logged.contains(
+            r#"level=WARN msg="credential refused on arrival" reason="wrong passphrase" err="acwbroker: the private key did not open with the passphrase given: upstream: decrypting private key: "#
+        ),
+        "{logged}"
+    );
+    assert!(!logged.contains("correct horse"), "{logged}");
+}

@@ -12,7 +12,8 @@ use tokio::time::{Instant, sleep_until};
 use zeroize::Zeroizing;
 
 use crate::caller::{Caller, ProcessImage, ProcessKey};
-use crate::issue::{Issue, Method};
+use crate::credential::Credential;
+use crate::issue::Issue;
 use crate::rule::{self, ImageMetadata};
 
 /// How long a token stays live with nothing having used it.
@@ -270,8 +271,7 @@ pub struct Tokens(Arc<Inner>);
 pub struct Grant {
     pub upstream: Vec<u8>,
     pub username: Vec<u8>,
-    pub method: Method,
-    pub password: Option<Zeroizing<Vec<u8>>>,
+    pub credential: Credential,
     pub admission: Admission,
     pub conn: Conn,
 }
@@ -380,8 +380,7 @@ impl Tokens {
         let mut issued = self.lock();
         issued.frozen = true;
         for e in issued.entries.iter_mut() {
-            let i = &mut e.issue;
-            (i.password, i.private_key, i.passphrase, i.certificate) = (None, None, None, None);
+            e.issue.credential.wipe();
             self.shred(e);
         }
     }
@@ -668,8 +667,7 @@ impl Tokens {
         Ok(Grant {
             upstream: e.issue.upstream.clone(),
             username: e.issue.username.clone(),
-            method: e.issue.method,
-            password: e.issue.password.clone(),
+            credential: e.issue.credential.clone(),
             admission,
             conn: Conn {
                 handle: self.handle(id),

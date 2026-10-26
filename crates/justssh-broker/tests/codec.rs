@@ -225,10 +225,13 @@ fn a_freeze_and_an_attach_are_read_as_acwbroker_reads_them() {
 #[test]
 fn the_documented_issues_read_as_acwbroker_reads_them() {
     let iss = issue::decode(&unhex(ISSUE_GOLDEN)).unwrap();
-    assert_eq!(iss.method, Method::Password);
+    assert_eq!(iss.credential.method, Method::Password);
     assert_eq!(iss.username, b"srv42@10.0.0.9");
     assert_eq!(iss.upstream, b"127.0.0.7:51201");
-    assert_eq!(iss.password.as_deref().map(|p| &p[..]), Some(&b"pw"[..]));
+    assert_eq!(
+        iss.credential.password.as_deref().map(|p| &p[..]),
+        Some(&b"pw"[..])
+    );
     assert!(!iss.no_file_transfer && iss.terminal.is_none() && iss.grace.is_none());
     assert!(iss.rule.is_none());
 
@@ -243,14 +246,17 @@ fn the_documented_issues_read_as_acwbroker_reads_them() {
     );
 
     let cert = issue::decode(&unhex(CERT_ISSUE_GOLDEN)).unwrap();
-    assert_eq!(cert.method, Method::Certificate);
+    assert_eq!(cert.credential.method, Method::Certificate);
     assert_eq!(
-        cert.private_key.as_deref().map(|p| &p[..]),
+        cert.credential.private_key.as_deref().map(|p| &p[..]),
         Some(&b"KEY"[..])
     );
-    assert_eq!(cert.passphrase.as_deref().map(|p| &p[..]), Some(&b"PP"[..]));
     assert_eq!(
-        cert.certificate.as_deref().map(|p| &p[..]),
+        cert.credential.passphrase.as_deref().map(|p| &p[..]),
+        Some(&b"PP"[..])
+    );
+    assert_eq!(
+        cert.credential.certificate.as_deref().map(|p| &p[..]),
         Some(&b"CERT"[..])
     );
 

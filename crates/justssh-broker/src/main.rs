@@ -11,6 +11,7 @@ use std::time::Duration;
 use justssh::HostKey;
 use justssh_broker::broker;
 use justssh_broker::hostkey;
+use justssh_broker::hostkey::HostKeys;
 use justssh_broker::issue::require_loopback;
 use justssh_broker::log::Log;
 use justssh_broker::logfile::{self, LogFile, Tee};
@@ -261,10 +262,11 @@ fn run(options: Options) -> Result<(), String> {
         let _entered = runtime.enter();
         tokio::net::TcpListener::from_std(listener).map_err(|e| e.to_string())?
     };
-    let host_key = HostKey::new(key.private_key().clone());
+    let host_keys =
+        HostKeys::new(HostKey::new(key.private_key().clone())).legacy(hostkey::legacy_path(&path));
     let serving = runtime.spawn(broker::serve(
         listener,
-        host_key,
+        host_keys,
         tokens.clone(),
         options.dial_timeout,
         Arc::new(peer::probe),

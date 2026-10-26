@@ -193,7 +193,7 @@ async fn broker_logging(tokens: Tokens, log: Log) -> String {
     let host_key = HostKey::ed25519_from_seed(Zeroizing::new([7; 32]));
     tokio::spawn(broker::serve(
         listener,
-        host_key,
+        justssh_broker::hostkey::HostKeys::new(host_key),
         tokens,
         Duration::from_secs(15),
         Arc::new(|_| {

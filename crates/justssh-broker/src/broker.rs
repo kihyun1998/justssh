@@ -13,9 +13,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use justssh::{
-    Action, ChannelId, Client, ClientConfig, Closed, DisconnectReason, Endpoint, Error, HostKey,
-    InfoRequest, OpenFailureReason, Phase, ReplyToken, RequestToken, Server, ServerConfig,
-    Zeroizing,
+    Action, ChannelId, Client, ClientConfig, Closed, DisconnectReason, Endpoint, Error,
+    InfoRequest, OpenFailureReason, Phase, ReplyToken, RequestToken, Server, Zeroizing,
 };
 use justssh_tokio::{Accepted, AuthMethod, ClientHandler, Connected, Deadlines, Session};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -23,6 +22,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::caller::Caller;
+use crate::credential;
+use crate::hostkey::HostKeys;
 use crate::issue::Method;
 use crate::log::{Log, go_duration, quote};
 use crate::tokens::{Admission, Conn, Grant, Handle, Shell, Tokens};
@@ -61,7 +62,7 @@ struct Logs {
 /// caller measured by `probe`, and logs what happens on them to `log`.
 pub async fn serve(
     listener: TcpListener,
-    host_key: HostKey,
+    host_keys: HostKeys,
     tokens: Tokens,
     dial: Duration,
     probe: Probe,
@@ -75,11 +76,11 @@ pub async fn serve(
         live: Arc::default(),
     };
     while let Ok((stream, addr)) = listener.accept().await {
-        let (host_key, tokens, probe) = (host_key.clone(), tokens.clone(), probe.clone());
+        let (host_keys, tokens, probe) = (host_keys.clone(), tokens.clone(), probe.clone());
         tokio::spawn(connection(
             stream,
             addr,
-            host_key,
+            host_keys,
             tokens,
             dial,
             probe,
@@ -93,14 +94,16 @@ pub async fn serve(
 async fn connection(
     stream: TcpStream,
     addr: SocketAddr,
-    host_key: HostKey,
+    host_keys: HostKeys,
     tokens: Tokens,
     dial: Duration,
     probe: Probe,
     logs: Logs,
 ) {
     let mut server = Server::new(
-        ServerConfig::builder(host_key)
+        host_keys
+            .config(&logs.log)
+            .await
             .max_auth_tries(NonZeroU32::MIN)
             .build(),
     );
@@ -413,15 +416,35 @@ impl ClientHandler for Answers {
 }
 
 /// The upstream `grant` names, connected within `dial` and authenticated with its password,
-/// then keyboard-interactive, with the connection the grant counts; or why it was not.
+/// then keyboard-interactive, or with its key, with the connection the grant counts; or why it
+/// was not.
 async fn upstream(
     grant: Grant,
     dial: Duration,
 ) -> Result<(Session<TcpStream, Client>, Conn), String> {
-    if grant.method != Method::Password {
-        return Err("upstream: only a password credential is supported".to_owned());
-    }
-    let password = grant.password.ok_or("upstream: the credential was wiped")?;
+    let credential = grant.credential;
+    let (methods, password) = match credential.method {
+        Method::Password => {
+            let password = credential
+                .password
+                .ok_or("upstream: the credential was wiped")?;
+            let methods = vec![
+                AuthMethod::Password(password.clone()),
+                AuthMethod::KeyboardInteractive,
+            ];
+            (methods, password)
+        }
+        _ => {
+            if credential.private_key.is_none() {
+                return Err("upstream: the credential was wiped".to_owned());
+            }
+            let key = credential::private_key(&credential).map_err(|r| r.cause)?;
+            (
+                vec![AuthMethod::PublicKeys(vec![key])],
+                Zeroizing::default(),
+            )
+        }
+    };
     let addr = String::from_utf8_lossy(&grant.upstream).into_owned();
     let stream = match timeout(dial, TcpStream::connect(&addr)).await {
         Ok(Ok(stream)) => stream,
@@ -429,10 +452,6 @@ async fn upstream(
         Err(_) => return Err(format!("dial tcp {addr}: i/o timeout")),
     };
     let mut client = Client::new(ClientConfig::builder(&grant.username).build());
-    let methods = [
-        AuthMethod::Password(password.clone()),
-        AuthMethod::KeyboardInteractive,
-    ];
     let connected = justssh_tokio::connect(
         stream,
         &mut client,

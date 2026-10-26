@@ -1078,7 +1078,10 @@ async fn each_token_resolves_to_its_own_grant() {
             .unwrap();
         assert_eq!(g.username, user.as_bytes());
         assert_eq!(g.upstream, up.as_bytes());
-        assert_eq!(g.password.as_deref().map(|p| &p[..]), Some(pw.as_bytes()));
+        assert_eq!(
+            g.credential.password.as_deref().map(|p| &p[..]),
+            Some(pw.as_bytes())
+        );
     }
 }
 

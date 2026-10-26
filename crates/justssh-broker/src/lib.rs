@@ -3,6 +3,7 @@
 
 pub mod broker;
 pub mod caller;
+pub mod credential;
 pub mod handoff;
 pub mod hostkey;
 pub mod issue;
