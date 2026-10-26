@@ -1,0 +1,49 @@
+name: release
+
+# Publishes the library crates to crates.io via Trusted Publishing: the job proves its
+# identity to crates.io over OIDC and gets a short-lived, publish-only token, so no
+# CRATES_IO_TOKEN secret is stored. Each crate must first have a Trusted Publisher configured
+# on crates.io (owner kihyun1998, repo justssh, workflow release.yml, environment crates-io).
+#
+# A crate name's FIRST-EVER publish cannot use this: Trusted Publishing is configured on an
+# existing crate, so v0.1.0 is published once by hand with `cargo login` + `cargo publish` in
+# dependency order, and this workflow takes over from the next version on.
+#
+# Order is a DAG: justssh-wire -> justssh -> justssh-keys -> justssh-tokio. `cargo publish`
+# waits for each crate to appear in the index before the next resolves it. The broker is
+# publish = false and is not here.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      id-token: write # mint the OIDC token Trusted Publishing exchanges
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Mint a crates.io token (Trusted Publishing)
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          for crate in justssh-wire justssh justssh-keys justssh-tokio; do
+            echo "::group::cargo publish -p $crate"
+            cargo publish -p "$crate"
+            echo "::endgroup::"
+          done
