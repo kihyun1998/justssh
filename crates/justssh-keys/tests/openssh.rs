@@ -421,6 +421,20 @@ fn ssh_keygen_reads_the_key_files_written() {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
+        // A file in %TEMP% inherits the folder's ACEs, which Windows OpenSSH rejects as "too
+        // open"; narrow it to the current user alone, as `0o600` does on unix.
+        #[cfg(windows)]
+        {
+            let user = std::env::var("USERNAME").unwrap();
+            let ok = std::process::Command::new("icacls")
+                .args([path.to_str().unwrap(), "/inheritance:r", "/grant:r"])
+                .arg(format!("{user}:F"))
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "icacls did not narrow {}", path.display());
+        }
         let out = ssh_keygen(&["-y", "-f", path.to_str().unwrap()]);
         let _ = std::fs::remove_file(&path);
         let Some(out) = out else {
