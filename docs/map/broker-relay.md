@@ -62,7 +62,7 @@ Each `shell`, `exec` and `subsystem`, and each refusal, is logged as Go logs it 
 - one shell per token across its connections, given back when its channel ends or its connection drops, and a second `shell` on the channel holding it crossing;
 - a disposed token: its upstream ended and a new channel refused.
 
-The broker there is given a probe that measures every connection as one process, since nothing is measured off Windows (`broker-tokens.md`).
+The broker there is given a probe that measures every connection as one process, since nothing is measured off Windows and macOS (`broker-tokens.md`) and the test's callers are all one process.
 
 Against acwbroker's blackbox, with `ACWBROKER_BIN` set to this binary, these 13 pass besides the three of #15 (measured on #59):
 - `TestAnIssueForANonLoopbackUpstreamIsRefusedAndTheSessionGoesOn`

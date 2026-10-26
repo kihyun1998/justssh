@@ -1,5 +1,5 @@
 //! What this machine reports, measured against itself (acwbroker
-//! `infrastructure/peer/peer_windows_test.go`). Windows only: elsewhere nothing is measured.
+//! `infrastructure/peer/peer_windows_test.go`). Windows only; macOS is `peer_macos.rs`.
 #![cfg(windows)]
 
 use std::net::{TcpListener, TcpStream};

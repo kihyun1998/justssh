@@ -5,6 +5,7 @@
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::caller::ProcessKey;
 use crate::credential;
 use crate::handoff::{self, Kind, ReadError};
 use crate::issue::{self, IssueError};
@@ -31,6 +32,9 @@ pub trait Hooks {
 
     /// Whether an ATTACH may hand over `path`.
     fn admit(&self, path: &str) -> Result<(), String>;
+
+    /// The processes whose controlling terminal is `terminal`, by pid and start time.
+    fn terminal_holders(&self, terminal: i32) -> Result<Vec<ProcessKey>, String>;
 }
 
 /// The writing half of a pipe, shared by its session and what tells the app unasked. One
@@ -154,19 +158,20 @@ impl<R: Read, W: Write> Session<R, W> {
                         );
                         self.write(Kind::Error, &handoff::refusal(reason, r.reason.code()))?;
                     }
-                    Ok(issue) if issue.terminal.is_some() => {
-                        self.log.warn(
-                            "terminal binding refused",
-                            &[
-                                ("terminal", issue.terminal.unwrap_or(0).into()),
-                                (
-                                    "err",
-                                    "peer: terminal binding is not implemented on this platform"
-                                        .into(),
-                                ),
-                            ],
-                        );
-                        self.fail("terminal to bind the token to was not found")?;
+                    Ok(issue) if let Some(terminal) = issue.terminal => {
+                        match holders_of(hooks, terminal) {
+                            Ok(holders) => {
+                                let token = tokens.issue_bound(issue, holders);
+                                self.write(Kind::Token, &handoff::token(&token))?;
+                            }
+                            Err(e) => {
+                                self.log.warn(
+                                    "terminal binding refused",
+                                    &[("terminal", terminal.into()), ("err", e.into())],
+                                );
+                                self.fail("terminal to bind the token to was not found")?;
+                            }
+                        }
                     }
                     Ok(issue) => {
                         let token = tokens.issue(issue);
@@ -209,4 +214,13 @@ impl<R: Read, W: Write> Session<R, W> {
             }
         }
     }
+}
+
+/// The processes holding `terminal`; none is an error.
+fn holders_of(hooks: &dyn Hooks, terminal: i32) -> Result<Vec<ProcessKey>, String> {
+    let holders = hooks.terminal_holders(terminal)?;
+    if holders.is_empty() {
+        return Err(format!("no process holds terminal {terminal}"));
+    }
+    Ok(holders)
 }

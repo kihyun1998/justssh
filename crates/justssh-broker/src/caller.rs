@@ -45,6 +45,8 @@ pub struct ProcessInfo {
     pub created: Option<SystemTime>,
     /// The executable's name, for a log line only.
     pub name: String,
+    /// The controlling terminal's device number, for a log line only.
+    pub tty: Option<i32>,
 }
 
 /// One process of this session with its full executable path, or why that could not be read.
@@ -135,6 +137,7 @@ impl ProcessInfo {
             parent,
             created,
             name: String::new(),
+            tty: None,
         }
     }
 }
@@ -163,9 +166,10 @@ impl Chain {
         let links: Vec<String> = self
             .links
             .iter()
-            .map(|l| match l.name.as_str() {
-                "" => l.pid.to_string(),
-                name => format!("{}({name})", l.pid),
+            .map(|l| match (l.name.as_str(), l.tty) {
+                (name, Some(tty)) => format!("{}({name} tty={tty})", l.pid),
+                ("", None) => l.pid.to_string(),
+                (name, None) => format!("{}({name})", l.pid),
             })
             .collect();
         format!("chain={} stop={}", links.join("<-"), self.stop.as_str())

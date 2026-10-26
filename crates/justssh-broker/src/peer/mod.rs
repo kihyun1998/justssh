@@ -1,19 +1,29 @@
 //! Which local process owns the other end of a loopback connection, and the other facts the
-//! tokens ask of this machine (acwbroker `infrastructure/peer`). Measured on Windows; on any
-//! other platform nothing is, and every caller then reads as having no owner.
+//! tokens ask of this machine (acwbroker `infrastructure/peer`). Measured on Windows and macOS;
+//! on any other platform nothing is, and every caller then reads as having no owner.
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(not(windows))]
 mod other;
+#[cfg(not(any(windows, target_os = "macos")))]
+mod stub;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(target_os = "macos")]
+pub use macos::*;
 #[cfg(not(windows))]
 pub use other::*;
+#[cfg(not(any(windows, target_os = "macos")))]
+pub use stub::*;
 #[cfg(windows)]
 pub use windows::*;
 
 use std::sync::Arc;
 
+#[cfg(not(target_os = "macos"))]
+use crate::caller::ProcessKey;
 use crate::log::Log;
 use crate::tokens::{Config, Peer};
 
@@ -47,4 +57,10 @@ pub fn config(log: &Log) -> Result<Config, String> {
         },
         ..Config::default()
     })
+}
+
+/// Who holds a terminal: not read here.
+#[cfg(not(target_os = "macos"))]
+pub fn terminal_holders(_terminal: i32) -> Result<Vec<ProcessKey>, String> {
+    Err("peer: terminal binding is not implemented on this platform".to_owned())
 }

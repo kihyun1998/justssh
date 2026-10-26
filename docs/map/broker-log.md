@@ -31,7 +31,7 @@ The same events as Go, in Go's words:
   - `authenticated` with the caller, the verdict, the admission branch and how many connections are live;
   - `authentication failed` with the user quoted and the refusal in acwbroker's words (`tokens::Refusal`);
   - `upstream authentication failed`.
-- **The caller:** written as Go's `Identity.String` and `Chain.String` write it: `pid=` and `image=` (or why not), `session=`, `user=` on Windows, then `chain=` and why the walk stopped (`Caller::described`).
+- **The caller:** written as Go's `Identity.String` and `Chain.String` write it: `pid=` and `image=` (or why not), `session=`, `user=` on Windows, then `chain=`, each link's terminal as `tty=` on macOS, and why the walk stopped (`Caller::described`).
 - **Handshakes:**
   - `downstream handshake timed out after 3m0s`;
   - `downstream handshake failed`, then what each side offered: the version line and the KEXINIT name-lists. These are kept from the first 16 KiB each way until authentication, as Go's `kexRecorder` keeps them.
@@ -63,7 +63,7 @@ Messages from x/crypto have justssh's words instead: the reason a handshake fail
 - **Format and file:** `tests/log.rs` checks lines against Go's own, and ports `logfile_test.go`.
 - **Events:** `tests/relay.rs` reads the lines of an authenticated connection, a refused one, an upstream that refuses the credential, and refusals of requests. It checks that no command, token or password appears.
 - **Reports and the caller string:** `tests/tokens.rs` checks the disposal reasons, a failed watch and the caller's rendering.
-- **The binary:** `tests/pipe.rs` checks the profile, the pipe's warnings, the freeze's lines on Windows, and that no secret reaches the file.
+- **The binary:** `tests/pipe.rs` checks the profile, the pipe's warnings, the freeze's lines on Windows and macOS, and that no secret reaches the file.
 
 Mutating the format, the file and each event turned a test red (measured on #66).
 - One mutation could not turn red: a downstream ending with nothing more to read is read as `clean`. That path is never reached, since the session reports the close first.

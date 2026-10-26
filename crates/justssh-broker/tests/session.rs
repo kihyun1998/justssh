@@ -4,6 +4,7 @@
 use std::io::{Cursor, Write};
 use std::sync::{Arc, Mutex};
 
+use justssh_broker::caller::{Caller, ProcessKey};
 use justssh_broker::handoff::{self, Kind};
 use justssh_broker::session::{Hooks, Session};
 use justssh_broker::tokens::{Config, Tokens};
@@ -91,12 +92,15 @@ impl Write for Closed {
     }
 }
 
-/// Freezes as told and admits paths as told, recording what it was asked.
+/// Freezes as told, admits paths as told and answers who holds a terminal as told, recording
+/// what it was asked.
 #[derive(Default)]
 struct Fake {
     frozen: Vec<u32>,
     unwatchable: bool,
     outside: bool,
+    holders: Option<Result<Vec<ProcessKey>, String>>,
+    asked: std::cell::RefCell<Vec<i32>>,
 }
 
 impl Hooks for Fake {
@@ -113,6 +117,13 @@ impl Hooks for Fake {
             true => Err("outside the roots".to_owned()),
             false => Ok(()),
         }
+    }
+
+    fn terminal_holders(&self, terminal: i32) -> Result<Vec<ProcessKey>, String> {
+        self.asked.borrow_mut().push(terminal);
+        self.holders
+            .clone()
+            .unwrap_or_else(|| Err("not asked for".to_owned()))
     }
 }
 
@@ -347,4 +358,111 @@ fn a_credential_that_cannot_be_read_is_refused_with_its_reason_and_the_session_g
         "{logged}"
     );
     assert!(!logged.contains("correct horse"), "{logged}");
+}
+
+/// A password ISSUE bound to terminal `dev`.
+fn bound_issue(dev: i32) -> Vec<u8> {
+    frame(
+        2,
+        &[
+            rec(0x10, b"password"),
+            rec(0x15, b"srv-7@10.0.0.9"),
+            rec(0x16, b"127.0.0.7:51201"),
+            rec(0x17, &dev.to_be_bytes()),
+            rec(0x11, b"real-secret"),
+        ]
+        .concat(),
+    )
+}
+
+/// A caller whose lineage, nearest first, is `keys`.
+fn lineage(keys: &[ProcessKey]) -> Caller {
+    let mut c = Caller::new(keys[0].pid);
+    c.lineage = keys.to_vec();
+    c.ancestry = keys.iter().map(|k| k.pid).collect();
+    c
+}
+
+/// Runs a session over `input` logging to a buffer; what it wrote and what it logged.
+fn run_logged(
+    runtime: &tokio::runtime::Runtime,
+    tokens: &Tokens,
+    hooks: &mut Fake,
+    input: &[Vec<u8>],
+) -> (Out, String) {
+    let hello = frame(1, &handoff::hello(handoff::VERSION));
+    let bytes = [&[hello][..], input].concat().concat();
+    let (out, log) = (Out::default(), Out::default());
+    let mut s = Session::new(Cursor::new(bytes), out.clone());
+    s.set_log(justssh_broker::log::Log::new(log.clone(), None));
+    s.handshake().unwrap();
+    let _entered = runtime.enter();
+    assert!(s.serve(tokens, hooks).is_ok());
+    let logged = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    (out, logged)
+}
+
+#[test]
+fn a_terminal_bound_issue_is_bound_to_the_processes_holding_that_terminal() {
+    let (rt, tokens) = setup();
+    let shell = ProcessKey::new(
+        4410,
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(9)),
+    );
+    let mut hooks = Fake {
+        holders: Some(Ok(vec![shell])),
+        ..Fake::default()
+    };
+    let (out, _) = run_logged(&rt, &tokens, &mut hooks, &[bound_issue(268_435_460)]);
+    assert_eq!(*hooks.asked.borrow(), [268_435_460]);
+    let frames = out.frames();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].0, Kind::Token as u8);
+    let token = &frames[0].2[5..];
+
+    let _entered = rt.enter();
+    let outside = lineage(&[ProcessKey::new(7000, None), ProcessKey::new(1, None)]);
+    assert!(
+        tokens
+            .authorize(token, b"srv-7@10.0.0.9", &outside)
+            .is_err()
+    );
+    let inside = lineage(&[ProcessKey::new(7001, None), shell, ProcessKey::new(1, None)]);
+    assert!(tokens.authorize(token, b"srv-7@10.0.0.9", &inside).is_ok());
+}
+
+#[test]
+fn a_terminal_nobody_holds_or_that_cannot_be_read_is_refused_and_the_session_goes_on() {
+    for (holders, err) in [
+        (Ok(Vec::new()), "no process holds terminal 5"),
+        (
+            Err("peer: sysctl kern.proc.all: denied".to_owned()),
+            "peer: sysctl kern.proc.all: denied",
+        ),
+    ] {
+        let (rt, tokens) = setup();
+        let mut hooks = Fake {
+            holders: Some(holders),
+            ..Fake::default()
+        };
+        let (out, logged) = run_logged(&rt, &tokens, &mut hooks, &[bound_issue(5), issue()]);
+        let kinds: Vec<_> = out.frames().into_iter().map(|(k, m, _)| (k, m)).collect();
+        assert_eq!(
+            kinds,
+            [
+                (
+                    5,
+                    Some("terminal to bind the token to was not found".to_owned())
+                ),
+                (Kind::Token as u8, None),
+            ]
+        );
+        assert_eq!(tokens.len(), 1);
+        assert!(
+            logged.contains(&format!(
+                "level=WARN msg=\"terminal binding refused\" terminal=5 err=\"{err}\""
+            )),
+            "{logged}"
+        );
+    }
 }

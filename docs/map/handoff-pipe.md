@@ -50,12 +50,12 @@ The loopback check is Go's `net.SplitHostPort` followed by `net.ParseIP`, ported
 These follow acwbroker's `pipe.go` `handle`, `cmd/acwbroker/freeze.go` and `main.go` `wireAttach` (#63).
 
 - **FREEZE:** the tunnel's process is watched first.
-  - When it cannot be watched, nothing changes, and the session ends with `tunnel could not be watched`. The maintainer's rule in Go is that a frozen broker with no exit to wait for would never end. Off Windows no process can be watched, so a FREEZE always ends the session there.
+  - When it cannot be watched, nothing changes, and the session ends with `tunnel could not be watched`. The maintainer's rule in Go is that a frozen broker with no exit to wait for would never end. Off Windows and macOS no process can be watched, so a FREEZE always ends the session there.
   - When it can, the tokens freeze (`broker-tokens.md`) and the listener closes. The serving task is aborted, which drops the listener; connections already accepted are their own tasks and go on.
   - After that, an ISSUE is refused with `frozen` and the session goes on. A second FREEZE is not read.
   - The pipe closing then leaves the process running until the tunnel exits. The tunnel exiting ends the process even with the pipe open, with code 0.
   - Unfrozen, the pipe closing ends the process as before.
-  - A tunnel watch that ends without seeing an exit is a gap, not an exit, as in Go's `hold_windows.go`. So a frozen broker whose watch failed keeps waiting, as Go's does.
+  - A tunnel watch that ends without seeing an exit is a gap, not an exit, as in Go's `hold_windows.go` and `hold_darwin.go`. So a frozen broker whose watch failed keeps waiting, as Go's does.
   - A session thread that ends without reporting (a panic) ends the process with an error. No test reaches either case.
 - **ATTACH:** a malformed one ends the session with `malformed attach`.
   - Its path must be admitted by the shredder: an absolute path to an existing entry directly under an `-attach-root` (repeatable), not a link.
@@ -78,9 +78,7 @@ The session therefore runs on a thread of its own, and the main thread waits for
   - A path already gone is done. A path still failing at the deadline is left for the app's next start to clear.
   - Shredding runs on a thread of its own, since the retries block.
 
-## What is answered without being carried out
-
-- **An ISSUE bound to a terminal:** refused with `terminal to bind the token to was not found`, after its credential is read. The terminal lookup is macOS-only in acwbroker and is left to #68.
+## What is absent
 
 Several parts of acwbroker are absent:
 - Memory sealing of held credentials. Credentials are held in zeroizing buffers instead.
@@ -101,6 +99,10 @@ Beside it is `hostkey-rsa`, for clients that know only `ssh-rsa`: acwbroker keep
 Making the key takes seconds unoptimised, and the blackbox starts every broker on an empty folder, so each one makes a key on its first connection. `num-bigint-dig` and `rsa` are built optimised in dev builds (workspace `Cargo.toml`): the test that makes one took 9.2 to 17.9 s without and 0.9 to 3.0 s with, cargo's start included (measured on #61).
 
 The ed25519 key is read once, at start. acwbroker reads it on every connection too, so a file removed while it runs is made again there and not here.
+
+## A terminal-bound ISSUE
+
+An ISSUE carrying a terminal (0x17) is bound, after its credential is read, to the processes whose controlling terminal it is (`Hooks::terminal_holders`, `peer::terminal_holders`), as Go's `holdersOf` binds it (#68). None holding it, or the lookup failing, is refused with `terminal to bind the token to was not found`, logged as `terminal binding refused` with the terminal and why: `no process holds terminal N`, or the lookup's error. Only the macOS Terminal binds a token to one, so elsewhere the lookup answers `peer: terminal binding is not implemented on this platform`, as Go's `holders_other.go` does.
 
 ## Against the blackbox
 

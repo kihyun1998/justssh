@@ -18,6 +18,9 @@ rsa-rand-core.workspace = true
 justssh-tokio = { path = "../justssh-tokio" }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-util", "sync"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

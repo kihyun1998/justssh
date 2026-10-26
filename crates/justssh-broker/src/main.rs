@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use justssh::HostKey;
 use justssh_broker::broker;
+use justssh_broker::caller::ProcessKey;
 use justssh_broker::hostkey;
 use justssh_broker::hostkey::HostKeys;
 use justssh_broker::issue::require_loopback;
@@ -314,7 +315,7 @@ enum Event {
     TunnelExited,
 }
 
-/// Carries out a FREEZE and judges ATTACH paths.
+/// Carries out a FREEZE, judges ATTACH paths and finds who holds a terminal.
 struct Freezer {
     tokens: Tokens,
     serving: AbortHandle,
@@ -346,5 +347,9 @@ impl Hooks for Freezer {
 
     fn admit(&self, path: &str) -> Result<(), String> {
         self.shredder.admit(path)
+    }
+
+    fn terminal_holders(&self, terminal: i32) -> Result<Vec<ProcessKey>, String> {
+        peer::terminal_holders(terminal)
     }
 }
