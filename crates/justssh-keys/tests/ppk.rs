@@ -92,10 +92,12 @@ fn a_file_whose_mac_does_not_match_is_refused() {
         "Comment: acwbroker-test-ed25519",
         "Comment: acwbroker-test-ed25519!",
     );
-    assert_eq!(
-        KeyFile::from_ppk(&text, None).err(),
-        Some(KeyFileError::Malformed)
-    );
+    for passphrase in [None, Some(WINSCP_PASS)] {
+        assert_eq!(
+            KeyFile::from_ppk(&text, passphrase).err(),
+            Some(KeyFileError::MacMismatch)
+        );
+    }
 }
 
 #[test]
@@ -123,6 +125,27 @@ fn an_argon2d_file_is_refused_by_name() {
     assert_eq!(
         KeyFile::from_ppk(&text, Some(WINSCP_PASS)).err(),
         Some(KeyFileError::UnsupportedEncryption("Argon2d".into()))
+    );
+    assert_eq!(
+        KeyFile::from_ppk(&text, None).err(),
+        Some(KeyFileError::PassphraseNeeded)
+    );
+}
+
+#[test]
+fn an_unknown_key_derivation_is_malformed_once_a_passphrase_is_given() {
+    let text = edited(
+        "ed25519-enc.ppk",
+        "Key-Derivation: Argon2id",
+        "Key-Derivation: Argon2x",
+    );
+    assert_eq!(
+        KeyFile::from_ppk(&text, Some(WINSCP_PASS)).err(),
+        Some(KeyFileError::Malformed)
+    );
+    assert_eq!(
+        KeyFile::from_ppk(&text, None).err(),
+        Some(KeyFileError::PassphraseNeeded)
     );
 }
 

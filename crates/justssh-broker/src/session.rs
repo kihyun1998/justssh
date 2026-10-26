@@ -5,6 +5,7 @@
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::credential;
 use crate::handoff::{self, Kind, ReadError};
 use crate::issue::{self, IssueError};
 use crate::log::Log;
@@ -142,6 +143,17 @@ impl<R: Read, W: Write> Session<R, W> {
             match frame.kind {
                 k if k == Kind::Issue as u8 && self.frozen => self.fail("frozen")?,
                 k if k == Kind::Issue as u8 => match issue::decode(&frame.payload) {
+                    Ok(issue) if let Err(r) = credential::check(&issue.credential) => {
+                        let reason = r.reason.message();
+                        self.log.warn(
+                            "credential refused on arrival",
+                            &[
+                                ("reason", reason.into()),
+                                ("err", format!("{}: {}", r.reason.error(), r.cause).into()),
+                            ],
+                        );
+                        self.write(Kind::Error, &handoff::refusal(reason, r.reason.code()))?;
+                    }
                     Ok(issue) if issue.terminal.is_some() => {
                         self.log.warn(
                             "terminal binding refused",

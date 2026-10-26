@@ -675,6 +675,8 @@ dependencies = [
  "justssh",
  "justssh-keys",
  "justssh-tokio",
+ "rand_core 0.6.4",
+ "rsa",
  "subtle",
  "tokio",
  "windows-sys",

@@ -54,9 +54,9 @@ The same events as Go, in Go's words:
   - each shred and each failed one;
   - a parent or own account that could not be read.
 
-Lines for parts the minimal broker does not have are absent: memory sealing, hardening, the legacy RSA host key and the arrival check (#61). The host key is read before the listener, so its per-connection line has no counterpart.
+Lines for parts the minimal broker does not have are absent: memory sealing and hardening. The ed25519 host key is read before the listener, so its per-connection line has no counterpart; the RSA one is read on each connection and has Go's (`handoff-pipe.md`).
 
-Messages from x/crypto have justssh's words instead: the reason a handshake failed, and an upstream's refusal. The upstream's lists the methods tried as Go's `unable to authenticate, attempted methods [...]` does.
+Messages from x/crypto have justssh's words instead: the reason a handshake failed, an upstream's refusal, and why a key or certificate did not read. A credential refused on arrival keeps acwbroker's own sentence for its reason before that cause, as Go's `classify` wraps it (#61). The upstream's lists the methods tried as Go's `unable to authenticate, attempted methods [...]` does.
 
 ## How it is proven
 

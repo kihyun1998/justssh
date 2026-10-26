@@ -12,7 +12,7 @@ Authentication follows acwbroker's `authenticate`:
 - The caller is measured from the connection's remote address, and the presented password is judged with it (`broker-tokens.md`).
 - The upstream is reached inside that judgement, so an upstream that refuses the credential fails the downstream authentication.
 
-The upstream connection is a TCP connect bounded by `-dial-timeout`, then password and keyboard-interactive, each question answered with the password (Go `passwordAnswers`). There is no deadline after the connect, as there is none in Go (#16, from #7). Any host key is taken (Go `InsecureIgnoreHostKey`), the upstream being acwtunnel on loopback. A channel the upstream opens is refused with `ADMINISTRATIVELY_PROHIBITED` and Go's message.
+The upstream connection is a TCP connect bounded by `-dial-timeout`, then, for a password credential, password and keyboard-interactive, each question answered with the password (Go `passwordAnswers`); for a key or certificate credential, `publickey` with that one key, under its certificate for the latter (Go `ssh.PublicKeys`), read again from the ISSUE's bytes for each dial (`handoff-pipe.md`). There is no deadline after the connect, as there is none in Go (#16, from #7). Any host key is taken (Go `InsecureIgnoreHostKey`), the upstream being acwtunnel on loopback. A channel the upstream opens is refused with `ADMINISTRATIVELY_PROHIBITED` and Go's message.
 
 Both identification lines are `SSH-2.0-justssh`, the server's downstream and the client's upstream, where acwbroker's are Go's default `SSH-2.0-Go`. The blackbox does not look at them. The maintainer chose on #59 to keep justssh's, shown that the downstream line could be set with `software_version` but the upstream one would need a client setter in the core.
 
@@ -79,6 +79,8 @@ Against acwbroker's blackbox, with `ACWBROKER_BIN` set to this binary, these 13 
 - `TestVendorRequestsCrossUnchangedWithTheirReply`
 - `TestTheHostKeySurvivesARestart`
 
+With #60, #62, #63 and #61 all 24 pass, the last two being `TestAPuTTYKeyCredentialAuthenticatesUpstream` and `TestACertificateCredentialAuthenticatesUpstream` (measured on #61, debug build).
+
 With #60 these two pass as well. Built without it, the broker fails both:
 - `TestATokenWithoutFileTransferRefusesSFTPAndSCPAndKeepsTheShell`
 - `TestOneShellPerTokenAcrossItsConnections`
@@ -88,4 +90,4 @@ With #62, `TestATokenIsGoneOnceTheProgramThatClaimedItExits` passes as well. Wit
 - `TestTheFirstUseOfAnAttachedTokenShredsItsFileAndReportsCLAIMED`
 - `TestAnAttachAfterUseIsAnsweredAsAlreadyUsed`
 
-The two that still fail wait on #61 (measured on #63).
+The last two passed with #61 (above).

@@ -13,6 +13,8 @@ justssh-keys.workspace = true
 getrandom = { workspace = true, features = ["sys_rng"] }
 zeroize.workspace = true
 subtle.workspace = true
+rsa.workspace = true
+rsa-rand-core.workspace = true
 justssh-tokio = { path = "../justssh-tokio" }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-util", "sync"] }
 
@@ -30,6 +32,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+justssh = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-util", "sync", "test-util"] }
 
 [lints]

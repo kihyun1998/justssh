@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
+use crate::credential::Credential;
 use crate::handoff::{find, records};
 
 const TAG_METHOD: u8 = 0x10;
@@ -47,21 +48,17 @@ pub struct Rule {
     pub extra_paths: Vec<Vec<u8>>,
 }
 
-/// One ISSUE. The secrets are zeroed when dropped, and `Debug` does not show them.
+/// One ISSUE.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Issue {
-    pub method: Method,
+    pub credential: Credential,
     pub username: Vec<u8>,
     pub upstream: Vec<u8>,
     pub terminal: Option<i32>,
     pub no_file_transfer: bool,
     pub rule: Option<Rule>,
     pub grace: Option<Duration>,
-    pub password: Option<Zeroizing<Vec<u8>>>,
-    pub private_key: Option<Zeroizing<Vec<u8>>>,
-    pub passphrase: Option<Zeroizing<Vec<u8>>>,
-    pub certificate: Option<Zeroizing<Vec<u8>>>,
 }
 
 /// Why an ISSUE was not taken.
@@ -137,17 +134,19 @@ pub fn decode(payload: &[u8]) -> Result<Issue, IssueError> {
         _ => return Err(refused),
     };
     Ok(Issue {
-        method,
+        credential: Credential {
+            method,
+            password,
+            private_key,
+            passphrase: secret(TAG_PASSPHRASE),
+            certificate,
+        },
         username: username.to_vec(),
         upstream: upstream.to_vec(),
         terminal,
         no_file_transfer,
         rule,
         grace,
-        password,
-        private_key,
-        passphrase: secret(TAG_PASSPHRASE),
-        certificate,
     })
 }
 
