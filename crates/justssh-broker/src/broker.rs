@@ -444,7 +444,9 @@ async fn upstream(
             if credential.private_key.is_none() {
                 return Err("upstream: the credential was wiped".to_owned());
             }
-            let key = credential::private_key(&credential).map_err(|r| r.cause)?;
+            let key = credential::private_key_off_thread(credential)
+                .await
+                .map_err(|r| r.cause)?;
             (
                 vec![AuthMethod::PublicKeys(vec![key])],
                 Zeroizing::default(),
