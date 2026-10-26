@@ -115,7 +115,7 @@ impl<A, B> Tee<A, B> {
 impl<A: Write, B: Write> Write for Tee<A, B> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let _ = self.0.write_all(buf);
-        let _ = self.1.write_all(buf);
+        self.1.write_all(buf).unwrap();
         Ok(buf.len())
     }
 
