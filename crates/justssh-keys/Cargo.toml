@@ -5,6 +5,8 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
+# Test fixtures (keys, vectors) stay in the repo for CI; they are not shipped to crates.io.
+exclude = ["tests/", "fuzz/"]
 
 [dependencies]
 justssh.workspace = true
