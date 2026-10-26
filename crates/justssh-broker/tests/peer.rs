@@ -2,7 +2,7 @@
 //! `infrastructure/peer/peer_windows_test.go`). Windows only; macOS is `peer_macos.rs`.
 #![cfg(windows)]
 
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ fn the_owner_of_a_connection_is_the_process_that_opened_it() {
         let (_server, remote) = listener.accept().unwrap();
         assert_eq!(remote, client.local_addr().unwrap());
 
-        let c = peer::probe(remote);
+        let c = peer::probe(remote, client.peer_addr().unwrap());
         assert_eq!(c.error, None, "{bind}");
         assert_eq!(c.pid, std::process::id(), "{bind}");
         let exe = std::env::current_exe().unwrap();
@@ -43,8 +43,23 @@ fn an_endpoint_nothing_owns_is_reported_as_unmeasured() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
-    let c = peer::probe(addr);
+    let c = peer::probe(addr, "127.0.0.1:9".parse().unwrap());
     assert!(c.unowned(), "{c:?}");
+}
+
+/// The owner is matched on both ends, so the local endpoint of a live connection is not found
+/// when the remote asked for is not the one it is connected to (#75).
+#[test]
+fn the_remote_end_is_part_of_the_match() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (_server, _) = listener.accept().unwrap();
+    let local = client.local_addr().unwrap();
+    let remote = client.peer_addr().unwrap();
+
+    assert_eq!(peer::owner(local, remote).pid, std::process::id());
+    let elsewhere = SocketAddr::new(remote.ip(), remote.port().wrapping_add(1));
+    assert!(peer::owner(local, elsewhere).error.is_some());
 }
 
 #[test]

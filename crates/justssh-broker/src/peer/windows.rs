@@ -67,9 +67,10 @@ fn open(pid: u32, access: u32) -> Result<Owned, String> {
     Ok(Owned(h))
 }
 
-/// The caller on the other end of `addr`, measured from one snapshot of processes.
-pub fn probe(addr: SocketAddr) -> Caller {
-    let owner = owner(addr);
+/// The caller on the other end of `local`, connected to `remote`, from one snapshot of
+/// processes.
+pub fn probe(local: SocketAddr, remote: SocketAddr) -> Caller {
+    let owner = owner(local, remote);
     let table = table();
     Caller::measure(
         owner,
@@ -83,9 +84,10 @@ pub fn probe(addr: SocketAddr) -> Caller {
     )
 }
 
-/// The process owning the local TCP endpoint `addr`, with its session, account and image.
-pub fn owner(addr: SocketAddr) -> Owner {
-    let pid = match owning_pid(addr) {
+/// The process owning the TCP socket whose endpoints are `local` and `remote`, with its
+/// session, account and image.
+pub fn owner(local: SocketAddr, remote: SocketAddr) -> Owner {
+    let pid = match owning_pid(local, remote) {
         Ok(pid) => pid,
         Err(e) => return Owner::unmeasured(e),
     };
@@ -102,29 +104,41 @@ pub fn owner(addr: SocketAddr) -> Owner {
     }
 }
 
-fn owning_pid(addr: SocketAddr) -> Result<u32, String> {
-    let ip = match addr.ip() {
+fn owning_pid(local: SocketAddr, remote: SocketAddr) -> Result<u32, String> {
+    // The two ends of a loopback connection share a family, so the local end picks the table
+    // and the remote end is read from the same row. Both ends are matched, since a local
+    // address and port alone is not unique: a second socket can reuse-bind it (#75).
+    let want = |a: SocketAddr| match a.ip() {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
         v4 => v4,
     };
-    let port = addr.port();
-    match ip {
-        IpAddr::V4(ip) => {
+    let (lip, lport, rip, rport) = (want(local), local.port(), want(remote), remote.port());
+    match (lip, rip) {
+        (IpAddr::V4(lip), IpAddr::V4(rip)) => {
             let buf = tcp_table(AF_INET)?;
             rows::<MIB_TCPROW_OWNER_PID>(&buf)
                 .find(|r| {
-                    port_of(r.dwLocalPort) == port && r.dwLocalAddr.to_le_bytes() == ip.octets()
+                    port_of(r.dwLocalPort) == lport
+                        && r.dwLocalAddr.to_le_bytes() == lip.octets()
+                        && port_of(r.dwRemotePort) == rport
+                        && r.dwRemoteAddr.to_le_bytes() == rip.octets()
                 })
                 .map(|r| r.dwOwningPid)
-                .ok_or_else(|| format!("peer: no IPv4 socket owns {ip}:{port}"))
+                .ok_or_else(|| format!("peer: no IPv4 socket owns {lip}:{lport}"))
         }
-        IpAddr::V6(ip) => {
+        (IpAddr::V6(lip), IpAddr::V6(rip)) => {
             let buf = tcp_table(AF_INET6)?;
             rows::<MIB_TCP6ROW_OWNER_PID>(&buf)
-                .find(|r| port_of(r.dwLocalPort) == port && r.ucLocalAddr == ip.octets())
+                .find(|r| {
+                    port_of(r.dwLocalPort) == lport
+                        && r.ucLocalAddr == lip.octets()
+                        && port_of(r.dwRemotePort) == rport
+                        && r.ucRemoteAddr == rip.octets()
+                })
                 .map(|r| r.dwOwningPid)
-                .ok_or_else(|| format!("peer: no IPv6 socket owns [{ip}]:{port}"))
+                .ok_or_else(|| format!("peer: no IPv6 socket owns [{lip}]:{lport}"))
         }
+        _ => Err(format!("peer: {local} and {remote} are different families")),
     }
 }
 
