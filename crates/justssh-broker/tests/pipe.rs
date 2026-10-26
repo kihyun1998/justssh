@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 use justssh_keys::KeyFile;
 
@@ -45,6 +45,17 @@ struct Broker {
 
 impl Broker {
     fn start(dir: &Path, host_key: &Path, listen: &str) -> Broker {
+        Broker::spawn(dir, host_key, listen, Stdio::null()).0
+    }
+
+    /// Spawns the broker with `stderr`, returning the broker and its stderr handle (`None`
+    /// unless `stderr` was piped). Taking the handle lets a test close the read end.
+    fn spawn(
+        dir: &Path,
+        host_key: &Path,
+        listen: &str,
+        stderr: Stdio,
+    ) -> (Broker, Option<ChildStderr>) {
         let mut child = Command::new(env!("CARGO_BIN_EXE_justssh-broker"))
             .args(["-listen", listen, "-profile", "prod A", "-logpath"])
             .arg(dir)
@@ -53,16 +64,20 @@ impl Broker {
             .env("ACRA_HOME", dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .unwrap();
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
-        Broker {
-            child,
-            stdin,
-            stdout,
-        }
+        let err = child.stderr.take();
+        (
+            Broker {
+                child,
+                stdin,
+                stdout,
+            },
+            err,
+        )
     }
 
     fn send_raw(&mut self, bytes: &[u8]) {
@@ -479,4 +494,33 @@ not in
 {log}"
         );
     }
+}
+
+/// The broker logs to stderr (teed with its log file). If stderr is closed while the broker
+/// outlives the app, the next log write must not take the process down — Rust leaves SIGPIPE
+/// ignored and the log tee swallows the write error (#81). Unix only: there is no SIGPIPE on
+/// Windows.
+#[cfg(unix)]
+#[test]
+fn a_closed_stderr_does_not_kill_the_broker_on_the_next_log() {
+    let dir = scratch("broken-stderr");
+    let (mut b, stderr) = Broker::spawn(&dir, &dir.join("hostkey"), "127.0.0.1:0", Stdio::piped());
+    b.ready();
+    // The app is gone and took its stderr reader with it.
+    drop(stderr.expect("piped stderr"));
+
+    // A terminal-bound ISSUE logs "terminal binding refused" (unimplemented on Linux), the
+    // first write to the now-broken stderr.
+    assert_eq!(
+        b.issue(&password_issue(
+            b"127.0.0.7:51201",
+            &rec(0x17, b"\x7f\xff\xff\xf8")
+        )),
+        Err("terminal to bind the token to was not found".into())
+    );
+    // The broker is still serving: a normal ISSUE still gets a token.
+    assert!(b.issue(&password_issue(b"127.0.0.7:51201", &[])).is_ok());
+    // And it exits cleanly rather than by a signal (finish() unwraps the exit code, which is
+    // None for a signalled process).
+    assert_eq!(b.finish(), (0, Vec::new()));
 }
