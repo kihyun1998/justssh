@@ -79,7 +79,7 @@ A rule is one of:
 
 Further paths are admitted by path alone, whatever the kind. An executable that could not be read is refused for that reason.
 
-Paths are compared as Go compares them on Windows: cleaned as `filepath.Clean` cleans them, and without regard to case. That is done on every platform, since only Windows callers are ever measured. Separators are `\` and `/`, and the volume is `C:` or `\\host\share`. Case is folded by `char::to_lowercase`, where Go uses `strings.EqualFold`'s simple folding; the two differ only for characters no executable path here has carried.
+Paths are compared as Go compares them on Windows: cleaned as `filepath.Clean` cleans them, and without regard to case. That is done on every platform. Go cleans with its own platform's rules, so on macOS, where callers are measured too (#68), the two differ for a path holding `\` or starting like a volume, which no macOS executable path this broker has seen carried. Separators are `\` and `/`, and the volume is `C:` or `\\host\share`. Case is folded by `char::to_lowercase`, where Go uses `strings.EqualFold`'s simple folding; the two differ only for characters no executable path here has carried.
 
 ## Measuring a caller on Windows
 
@@ -96,14 +96,24 @@ Paths are compared as Go compares them on Windows: cleaned as `filepath.Clean` c
 
 The ancestry walk (`caller::walk`) goes up 12 processes at most. It stops where a parent started after its child, since that pid was reused, and on a cycle.
 
+## Measuring a caller on macOS
+
+`peer/macos.rs` follows Go's `peer_darwin.go`, `table_darwin.go` and `hold_darwin.go` (#68), through `libc`:
+- **The owner:** macOS keeps no table from socket to process, so every process this one may read is asked: `proc_listpids`, sized and read again with room for 128 more; `proc_pidinfo(PROC_PIDLISTFDS)` for its descriptors, keeping the sockets; `proc_pidfdinfo(PROC_PIDFDSOCKETINFO)` for each, keeping a TCP socket whose local port and address are the ones asked about. A process that cannot be read is passed over, since those are other users' (Go measured 257 of 613), and a caller is always this user's. Nothing found is the error `no socket owns that endpoint`, never pid 0. Go measured a full miss over about 600 processes at under 3 ms. The image is `proc_pidpath`.
+- **The socket record:** `libc` has no `socket_fdinfo`, so `SocketFdInfo` and the structures in it are written out from xnu's `bsd/sys/proc_info.h`: 792 bytes, the union `soi_proto` sized by its largest arm (`un_sockinfo`, 528). A copy shorter than that is not read. The local port is in network order in the low half of `insi_lport`. An IPv4 address is the last four bytes of `insi_laddr` (`in4in6_addr`, offset 12), chosen by `insi_vflag`; Go measured that reading offset 0 misses every IPv4 lookup while IPv6 goes on working.
+- **The process list:** one `sysctl` of `kern.proc.all`, so the walk reads one instant, as Toolhelp gives on Windows. `kinfo_proc` is read at fixed offsets: 648 bytes; the start time at 0 (seconds) and 8 (microseconds), `p_pid` at 40, `p_comm` (16 bytes and a NUL) at 243, `e_ppid` at 560, `e_tdev` at 572, the same on arm64 and x86-64. They were read off x/sys/unix v0.47.0's `KinfoProc`, generated from the headers, by having the Go compiler report each `unsafe.Offsetof` for `GOOS=darwin`. The start time is in the same copy as the pid, so it is never missing here. A controlling terminal of `NODEV` (-1) is none.
+- **A terminal's holders:** a fresh snapshot's processes whose controlling terminal is the one asked about, by pid and start time, which is what the token is bound to; terminal numbers are reused as soon as they are released.
+- **The exit watch:** a kqueue `EVFILT_PROC` `NOTE_EXIT` filter, registered before the hold returns, so a pid with no process is an error. One thread owns the descriptor and waits 500 ms at a time until the exit or the hold is dropped. A wait that fails is a watch that ended, not an exit. Go's tests of releasing a hold have no counterpart: a dropped `Held` has no receiver left to report to.
+
+No session, account, version resource or process list of a session is read on macOS, as in Go's `*_other.go`: those checks are off, a kind 3 rule cannot match by metadata, and a launched process that exits is not replaced.
+
 On any other platform nothing is measured, as in Go's `stub_other.go`. Every caller reads as having no owner and is refused. So `tests/relay.rs` gives the broker a probe that always reports the same process.
 
-CI runs on Ubuntu, so the Windows code is linted there with `--target x86_64-pc-windows-msvc` and not run. The maintainer chose that on #62 over a Windows runner. `tests/peer.rs` runs only on Windows. It checks the owner of a connection this process opened (IPv4 and IPv6), its image, session, account and ancestry, a child's exit, and a version resource.
+CI runs on Ubuntu, so the Windows code is linted there with `--target x86_64-pc-windows-msvc` and not run. The maintainer chose that on #62 over a Windows runner. For macOS the maintainer chose on #68 a `macos-latest` job that lints and runs the broker's tests, over linting alone. `tests/peer.rs` runs only on Windows, `tests/peer_macos.rs` only on macOS: Go's darwin tests of the owner over IPv4 and IPv6 opened by another process, an unowned port, the address compared, the scan under 100 ms, the snapshot against the kernel, a start time to better than a second, the controlling terminal against `ps` and `stat`, a terminal's holders under `script(1)`, and the exit watch. It checks the owner of a connection this process opened (IPv4 and IPv6), its image, session, account and ancestry, a child's exit, and a version resource.
 
 ## Not here
 
 - The verdict (in-tree, out-of-tree, unmeasured), the admission branch and the reasons for a disposal are only logged, as in Go (`broker-log.md`).
-- On macOS, Go measures callers with libproc and resolves a terminal binding (0x17) to the processes holding it. That is left to a follow-up, by the maintainer's choice on #62. Meanwhile the pipe refuses a terminal-bound ISSUE (`handoff-pipe.md`), as Go does wherever the lookup is missing.
 
 ## How it is proven
 
