@@ -197,7 +197,7 @@ fn the_broker_announces_itself_and_hands_out_a_token_per_issue() {
     assert_eq!(
         b.issue(&password_issue(
             b"127.0.0.1:22",
-            &rec(0x17, b"\x10\0\0\x04")
+            &rec(0x17, b"\x7f\xff\xff\xf8")
         )),
         Err("terminal to bind the token to was not found".into())
     );
@@ -229,8 +229,16 @@ fn the_broker_announces_itself_and_hands_out_a_token_per_issue() {
 
     assert_eq!(b.finish(), (0, Vec::new()));
     let log = std::fs::read_to_string(dir.join("acwbroker.log")).unwrap();
+    let unbound = if cfg!(target_os = "macos") {
+        "no process holds terminal 2147483640"
+    } else {
+        "peer: terminal binding is not implemented on this platform"
+    };
+    let unbound = format!(
+        r#"level=WARN msg="terminal binding refused" profile="prod A" terminal=2147483640 err="{unbound}""#
+    );
     for want in [
-        r#"level=WARN msg="terminal binding refused" profile="prod A" terminal=268435460 err="peer: terminal binding is not implemented on this platform""#,
+        unbound.as_str(),
         r#"level=WARN msg="attach refused" profile="prod A" err="acwbroker: no live token matches the presented password""#,
         r#"level=WARN msg="attach refused" profile="prod A" err="acwbroker: the path is not directly under an attach root""#,
     ] {
@@ -409,16 +417,25 @@ fn a_listen_address_or_host_key_that_cannot_be_used_is_reported_before_exiting()
 }
 
 /// A frozen broker refuses ISSUE, outlives the pipe and ends when the tunnel it watches does
-/// (acwbroker `cmd/acwbroker/freeze_test.go`). Windows only: elsewhere no process is watched.
-#[cfg(windows)]
+/// (acwbroker `cmd/acwbroker/freeze_test.go`). Windows and macOS only: elsewhere no process is
+/// watched.
+#[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn a_frozen_broker_outlives_the_pipe_and_ends_with_its_tunnel() {
     let dir = scratch("freeze");
-    let mut tunnel = Command::new("cmd")
-        .args(["/c", "ping -n 30 127.0.0.1 >nul"])
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut tunnel = if cfg!(windows) {
+        Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap()
+    } else {
+        Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
     let mut b = Broker::start(&dir, &dir.join("hostkey"), "127.0.0.1:0");
     let (addr, _) = b.ready();
     b.send(7, &rec(0x40, &tunnel.id().to_be_bytes()));

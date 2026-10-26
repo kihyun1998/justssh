@@ -675,6 +675,7 @@ dependencies = [
  "justssh",
  "justssh-keys",
  "justssh-tokio",
+ "libc",
  "rand_core 0.6.4",
  "rsa",
  "subtle",
