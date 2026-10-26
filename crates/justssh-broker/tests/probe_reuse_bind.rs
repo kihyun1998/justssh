@@ -19,7 +19,7 @@ fn a_second_socket_taking_a_connected_endpoint() {
     let connected = TcpStream::connect(server_addr).unwrap();
     let (_accepted, _) = listener.accept().unwrap();
     let held = connected.local_addr().unwrap();
-    eprintln!("PROBE held endpoint = {held}");
+    let mut report = vec![format!("held={held}")];
 
     for reuse_port in [false, true] {
         let s = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
@@ -31,16 +31,18 @@ fn a_second_socket_taking_a_connected_endpoint() {
         }
         #[cfg(windows)]
         if reuse_port {
-            eprintln!("PROBE reuse_port=skip (windows has no SO_REUSEPORT)");
+            report.push("reuse_port=skip(windows)".to_owned());
             continue;
         }
         let r = s.bind(&held.into());
-        eprintln!(
-            "PROBE reuse_addr=true reuse_port={reuse_port} bind-to-held = {}",
+        report.push(format!(
+            "reuse_port={reuse_port} bind={}",
             match &r {
                 Ok(()) => "OK".to_owned(),
                 Err(e) => format!("Err({})", e.kind()),
             }
-        );
+        ));
     }
+    // Deliberately fail so the measurement reaches the CI log (throwaway probe, #75).
+    panic!("PROBE75 {}", report.join(" | "));
 }
