@@ -1359,6 +1359,19 @@ fn pids(t: &FakeTable, pid: u32) -> (Vec<u32>, Stop) {
 }
 
 #[test]
+fn the_rendering_carries_each_links_terminal() {
+    let mut terminal = ProcessInfo::new(612, 0, at(1));
+    terminal.name = "Terminal".to_owned();
+    let mut expect = ProcessInfo::new(8699, 612, at(3));
+    expect.name = "expect".to_owned();
+    expect.tty = Some(268_435_460);
+    let t = FakeTable([(612, terminal), (8699, expect)].into_iter().collect());
+    let got = walk(&t, 8699).render();
+    assert!(got.contains("8699(expect tty=268435460)"), "{got}");
+    assert!(got.contains("612(Terminal)"), "{got}");
+}
+
+#[test]
 fn a_grandchild_is_walked_back_to_the_root() {
     let t = table(&[(100, 0, at(0)), (200, 100, at(1)), (300, 200, at(2))]);
     assert_eq!(pids(&t, 300), (vec![300, 200, 100], Stop::NoParent));

@@ -131,7 +131,7 @@ struct SocketFdInfo {
 const _: () = assert!(size_of::<TcpSockInfo>() <= size_of::<[u64; 66]>());
 
 /// `struct kinfo_proc` as `kern.proc.all` copies it out: its size and the offsets of the
-/// fields read, the same on arm64 and x86-64 (x/sys/unix `KinfoProc`).
+/// fields read.
 mod kinfo {
     pub const SIZE: usize = 648;
     pub const START_SEC: usize = 0;
@@ -302,9 +302,9 @@ fn image_path(pid: u32) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// One `kern.proc.all` copy of the process list, with each process's controlling terminal.
+/// One `kern.proc.all` copy of the process list.
 pub struct Table {
-    by_pid: HashMap<u32, (ProcessInfo, Option<i32>)>,
+    by_pid: HashMap<u32, ProcessInfo>,
 }
 
 pub fn table() -> Result<Table, String> {
@@ -367,8 +367,8 @@ pub fn table() -> Result<Table, String> {
         let comm = &p[kinfo::COMM..][..kinfo::COMM_LEN];
         let len = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
         info.name = String::from_utf8_lossy(&comm[..len]).into_owned();
-        let tty = Some(i32_at(p, kinfo::TDEV)).filter(|&d| d != NODEV);
-        by_pid.insert(pid, (info, tty));
+        info.tty = Some(i32_at(p, kinfo::TDEV)).filter(|&d| d != NODEV);
+        by_pid.insert(pid, info);
     }
     Ok(Table { by_pid })
 }
@@ -381,7 +381,7 @@ impl ProcessTable for Table {
     fn info(&self, pid: u32) -> Result<ProcessInfo, String> {
         self.by_pid
             .get(&pid)
-            .map(|(p, _)| p.clone())
+            .cloned()
             .ok_or_else(|| format!("peer: no process {pid} in the snapshot"))
     }
 }
@@ -392,8 +392,8 @@ pub fn terminal_holders(terminal: i32) -> Result<Vec<ProcessKey>, String> {
     Ok(table()?
         .by_pid
         .values()
-        .filter(|(_, tty)| *tty == Some(terminal))
-        .map(|(p, _)| ProcessKey::new(p.pid, p.created))
+        .filter(|p| p.tty == Some(terminal))
+        .map(|p| ProcessKey::new(p.pid, p.created))
         .collect())
 }
 

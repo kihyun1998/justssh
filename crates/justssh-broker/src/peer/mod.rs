@@ -22,6 +22,8 @@ pub use windows::*;
 
 use std::sync::Arc;
 
+#[cfg(not(target_os = "macos"))]
+use crate::caller::ProcessKey;
 use crate::log::Log;
 use crate::tokens::{Config, Peer};
 
@@ -55,4 +57,10 @@ pub fn config(log: &Log) -> Result<Config, String> {
         },
         ..Config::default()
     })
+}
+
+/// Who holds a terminal: not read here.
+#[cfg(not(target_os = "macos"))]
+pub fn terminal_holders(_terminal: i32) -> Result<Vec<ProcessKey>, String> {
+    Err("peer: terminal binding is not implemented on this platform".to_owned())
 }

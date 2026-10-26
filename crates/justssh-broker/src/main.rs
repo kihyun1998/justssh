@@ -315,7 +315,7 @@ enum Event {
     TunnelExited,
 }
 
-/// Carries out a FREEZE and judges ATTACH paths.
+/// Carries out a FREEZE, judges ATTACH paths and finds who holds a terminal.
 struct Freezer {
     tokens: Tokens,
     serving: AbortHandle,

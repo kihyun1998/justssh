@@ -213,12 +213,19 @@ fn in_a_terminal() -> (Child, u32) {
 #[test]
 fn the_controlling_terminal_agrees_with_the_kernel() {
     let (script, child) = in_a_terminal();
-    let tty = kernel_tty(child).unwrap();
-    let holders = peer::terminal_holders(tty).unwrap();
-    let me = peer::terminal_holders(kernel_tty(std::process::id()).unwrap_or(-2)).unwrap();
+    let pids = [child, script.id(), std::process::id()];
+    let t = peer::table().unwrap();
+    let mut seen = Vec::new();
+    for pid in pids {
+        let want = kernel_tty(pid);
+        assert_eq!(t.info(pid).unwrap().tty, want, "pid {pid}");
+        seen.push(want.is_some());
+    }
     kill(script);
-    assert!(holders.iter().any(|h| h.pid == child), "{holders:?}");
-    assert!(me.iter().all(|h| h.pid != child), "{me:?}");
+    assert!(
+        seen.contains(&true) && seen.contains(&false),
+        "measured only {seen:?}; need a process with a terminal and one without"
+    );
 }
 
 #[test]
@@ -238,6 +245,11 @@ fn the_holders_of_a_terminal_are_the_processes_whose_controlling_terminal_it_is(
         "{holders:?} lacks {child} with its start time"
     );
     assert_eq!(peer::terminal_holders(i32::MAX - 7), Ok(Vec::new()));
+    assert_eq!(
+        peer::terminal_holders(-1),
+        Ok(Vec::new()),
+        "NODEV is no terminal"
+    );
 }
 
 /// A process whose parent is not this test, as every real caller's is not.

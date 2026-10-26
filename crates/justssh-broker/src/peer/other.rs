@@ -1,8 +1,6 @@
 use crate::caller::ProcessImage;
 use crate::rule::ImageMetadata;
 
-const UNSUPPORTED: &str = "peer: this is not implemented on this platform";
-
 /// No logon session: no caller's session is compared.
 pub fn own_session() -> Result<Option<u32>, String> {
     Ok(None)
@@ -25,9 +23,10 @@ pub fn utc_offset_minutes() -> i32 {
 
 /// The processes of a session: never listed here.
 pub fn candidates(_session: Option<u32>) -> Result<Vec<ProcessImage>, String> {
-    Err(UNSUPPORTED.to_owned())
+    Err("peer: candidates are not read on this platform".to_owned())
 }
 
+/// No version resource: never read here.
 pub fn metadata(_path: &str) -> Result<ImageMetadata, String> {
-    Err(UNSUPPORTED.to_owned())
+    Err("peer: no version resources on this platform".to_owned())
 }

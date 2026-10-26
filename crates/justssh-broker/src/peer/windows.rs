@@ -31,7 +31,7 @@ use windows_sys::Win32::System::Time::{
     GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
 };
 
-use crate::caller::{Caller, Owner, ProcessImage, ProcessInfo, ProcessKey, ProcessTable};
+use crate::caller::{Caller, Owner, ProcessImage, ProcessInfo, ProcessTable};
 use crate::rule::ImageMetadata;
 use crate::tokens::{Held, Hold};
 
@@ -526,8 +526,3 @@ impl Hold for Holder {
 }
 
 unsafe impl Send for Owned {}
-
-/// Who holds a terminal: never read here, since only the macOS Terminal binds a token to one.
-pub fn terminal_holders(_terminal: i32) -> Result<Vec<ProcessKey>, String> {
-    Err("peer: terminal binding is not implemented on this platform".to_owned())
-}
