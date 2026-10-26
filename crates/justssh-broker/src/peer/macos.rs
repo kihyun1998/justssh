@@ -146,9 +146,10 @@ mod kinfo {
 /// `NODEV`: no controlling terminal.
 const NODEV: i32 = -1;
 
-/// The caller on the other end of `addr`, measured from one snapshot of processes.
-pub fn probe(addr: SocketAddr) -> Caller {
-    let owner = owner(addr);
+/// The caller on the other end of `local`, connected to `remote`, from one snapshot of
+/// processes.
+pub fn probe(local: SocketAddr, remote: SocketAddr) -> Caller {
+    let owner = owner(local, remote);
     let table = table();
     Caller::measure(
         owner,
@@ -162,9 +163,9 @@ pub fn probe(addr: SocketAddr) -> Caller {
     )
 }
 
-/// The process owning the local TCP endpoint `addr`, with its image.
-pub fn owner(addr: SocketAddr) -> Owner {
-    let pid = match owning_pid(addr) {
+/// The process owning the TCP socket whose endpoints are `local` and `remote`, with its image.
+pub fn owner(local: SocketAddr, remote: SocketAddr) -> Owner {
+    let pid = match owning_pid(local, remote) {
         Ok(pid) => pid,
         Err(e) => return Owner::unmeasured(e),
     };
@@ -182,8 +183,12 @@ pub fn owner(addr: SocketAddr) -> Owner {
 
 /// The first process that holds a TCP socket bound to `addr`, among those this process may
 /// read.
-fn owning_pid(addr: SocketAddr) -> Result<u32, String> {
-    let want = addr.ip().to_canonical();
+fn owning_pid(local: SocketAddr, remote: SocketAddr) -> Result<u32, String> {
+    // Both ends are matched, since a local address and port alone is not unique: a second
+    // socket can reuse-bind it (#75).
+    let same = |a: SocketAddr, b: SocketAddr| {
+        a.port() == b.port() && a.ip().to_canonical() == b.ip().to_canonical()
+    };
     for pid in all_pids()? {
         if pid <= 0 {
             continue;
@@ -192,15 +197,15 @@ fn owning_pid(addr: SocketAddr) -> Result<u32, String> {
             continue;
         };
         for fd in fds {
-            match tcp_local_endpoint(pid, fd) {
-                Some((ip, port)) if port == addr.port() && ip.to_canonical() == want => {
+            match tcp_endpoints(pid, fd) {
+                Some((l, r)) if same(l, local) && same(r, remote) => {
                     return Ok(pid as u32);
                 }
                 _ => {}
             }
         }
     }
-    Err(format!("peer: no socket owns that endpoint: {addr}"))
+    Err(format!("peer: no socket owns that endpoint: {local}"))
 }
 
 fn all_pids() -> Result<Vec<i32>, String> {
@@ -255,7 +260,7 @@ fn socket_fds(pid: i32) -> Option<Vec<i32>> {
 }
 
 /// The local address and port of `pid`'s descriptor `fd` when it is a TCP socket.
-fn tcp_local_endpoint(pid: i32, fd: i32) -> Option<(IpAddr, u16)> {
+fn tcp_endpoints(pid: i32, fd: i32) -> Option<(SocketAddr, SocketAddr)> {
     let mut si: SocketFdInfo = unsafe { zeroed() };
     let size = size_of::<SocketFdInfo>() as i32;
     let got = unsafe {
@@ -272,18 +277,28 @@ fn tcp_local_endpoint(pid: i32, fd: i32) -> Option<(IpAddr, u16)> {
     }
     let tcp = unsafe { &*(&raw const si.psi.soi_proto).cast::<TcpSockInfo>() };
     let ini = &tcp.tcpsi_ini;
-    let port = u16::from_be(ini.insi_lport as u16);
-    let raw = ini.insi_laddr;
-    if ini.insi_vflag & INI_IPV4 != 0 {
-        Some((
-            IpAddr::V4(Ipv4Addr::new(raw[12], raw[13], raw[14], raw[15])),
-            port,
-        ))
-    } else if ini.insi_vflag & INI_IPV6 != 0 {
-        Some((IpAddr::V6(Ipv6Addr::from(raw)), port))
-    } else {
-        None
-    }
+    // One address and port, by `insi_vflag`: an IPv4 address is the last four bytes (offset 12
+    // in `in4in6_addr`), and the port is in network order in the field's low half.
+    let endpoint = |raw: [u8; 16], port: i32| -> Option<SocketAddr> {
+        let port = u16::from_be(port as u16);
+        if ini.insi_vflag & INI_IPV4 != 0 {
+            Some(
+                (
+                    IpAddr::V4(Ipv4Addr::new(raw[12], raw[13], raw[14], raw[15])),
+                    port,
+                )
+                    .into(),
+            )
+        } else if ini.insi_vflag & INI_IPV6 != 0 {
+            Some((IpAddr::V6(Ipv6Addr::from(raw)), port).into())
+        } else {
+            None
+        }
+    };
+    Some((
+        endpoint(ini.insi_laddr, ini.insi_lport)?,
+        endpoint(ini.insi_faddr, ini.insi_fport)?,
+    ))
 }
 
 fn image_path(pid: u32) -> Result<String, String> {
@@ -467,8 +482,10 @@ mod tests {
     fn the_local_address_sits_where_the_header_puts_it() {
         assert_eq!(std::mem::offset_of!(SocketInfo, soi_kind), 232);
         assert_eq!(std::mem::offset_of!(SocketInfo, soi_proto), 240);
+        assert_eq!(std::mem::offset_of!(InSockInfo, insi_fport), 0);
         assert_eq!(std::mem::offset_of!(InSockInfo, insi_lport), 4);
         assert_eq!(std::mem::offset_of!(InSockInfo, insi_vflag), 24);
+        assert_eq!(std::mem::offset_of!(InSockInfo, insi_faddr), 32);
         assert_eq!(std::mem::offset_of!(InSockInfo, insi_laddr), 48);
     }
 }

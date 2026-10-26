@@ -47,7 +47,7 @@ const MAX_LOGGED_NAME: usize = 32;
 const KEX_CAPTURE: usize = 16 << 10;
 
 /// Measures who is on the other end of a connection, given its remote address.
-pub type Probe = Arc<dyn Fn(SocketAddr) -> Caller + Send + Sync>;
+pub type Probe = Arc<dyn Fn(SocketAddr, SocketAddr) -> Caller + Send + Sync>;
 
 /// What every connection's lines carry and count: the log, the listener's address, and how
 /// many connections are authenticated.
@@ -108,9 +108,15 @@ async fn connection(
             .build(),
     );
     let deadlines = Deadlines::new().phase(Phase::Auth, HANDSHAKE_TIMEOUT);
+    // The endpoint this socket is connected to, so the owner is matched on the whole 4-tuple
+    // and not a local address and port a second socket could reuse-bind (#75). An accepted
+    // socket's local address is always readable; if it somehow is not, `addr` cannot be a
+    // remote for a socket whose local is also `addr`, so the lookup finds nothing and the
+    // caller is refused.
+    let remote = stream.local_addr().unwrap_or(addr);
     let (io, kex) = Recorded::new(stream);
     let accepted = justssh_tokio::accept(io, &mut server, &deadlines, |request| {
-        let caller = probe(addr);
+        let caller = probe(addr, remote);
         let verdict = caller.verdict(tokens.app());
         let grant = tokens.authorize(request.password(), request.user(), &caller);
         let user = quote(request.user());

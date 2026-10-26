@@ -196,7 +196,7 @@ async fn broker_logging(tokens: Tokens, log: Log) -> String {
         justssh_broker::hostkey::HostKeys::new(host_key),
         tokens,
         Duration::from_secs(15),
-        Arc::new(|_| {
+        Arc::new(|_, _| {
             let mut c = Caller::new(CALLER);
             c.described = "pid=4242 image=putty.exe".to_owned();
             c

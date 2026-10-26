@@ -44,7 +44,7 @@ fn the_owner_of_a_loopback_connection_is_the_process_that_opened_it() {
             eprintln!("skipped {bind}: cannot listen");
             continue;
         };
-        let owner = peer::owner(conn.peer_addr().unwrap());
+        let owner = peer::owner(conn.peer_addr().unwrap(), conn.local_addr().unwrap());
         let pid = child.id();
         kill(child);
         assert_eq!(owner.error, None, "{bind}");
@@ -59,7 +59,7 @@ fn an_unowned_port_is_a_failed_measurement_and_not_pid_zero() {
         .unwrap()
         .local_addr()
         .unwrap();
-    let owner = peer::owner(addr);
+    let owner = peer::owner(addr, "127.0.0.1:9".parse().unwrap());
     let error = owner.error.unwrap_or_default();
     assert!(error.contains("no socket owns that endpoint"), "{error}");
     assert_eq!(owner.pid, 0);
@@ -72,7 +72,7 @@ fn the_address_is_compared_and_not_only_the_port() {
     };
     let mut other = conn.peer_addr().unwrap();
     other.set_ip("127.0.0.2".parse().unwrap());
-    let owner = peer::owner(other);
+    let owner = peer::owner(other, conn.local_addr().unwrap());
     kill(child);
     let error = owner.error.unwrap_or_default();
     assert!(
@@ -83,12 +83,26 @@ fn the_address_is_compared_and_not_only_the_port() {
 }
 
 #[test]
+fn the_remote_end_is_part_of_the_match() {
+    let Some((conn, child)) = accept_from("127.0.0.1:0") else {
+        return;
+    };
+    let local = conn.peer_addr().unwrap();
+    let remote = conn.local_addr().unwrap();
+    assert_eq!(peer::owner(local, remote).pid, child.id());
+    let elsewhere = SocketAddr::new(remote.ip(), remote.port().wrapping_add(1));
+    let owner = peer::owner(local, elsewhere);
+    kill(child);
+    assert!(owner.error.is_some(), "pid {}", owner.pid);
+}
+
+#[test]
 fn the_scan_costs_far_less_than_a_dial() {
     let Some((conn, child)) = accept_from("127.0.0.1:0") else {
         return;
     };
     let start = Instant::now();
-    let owner = peer::owner(conn.peer_addr().unwrap());
+    let owner = peer::owner(conn.peer_addr().unwrap(), conn.local_addr().unwrap());
     let took = start.elapsed();
     kill(child);
     assert_eq!(owner.error, None);

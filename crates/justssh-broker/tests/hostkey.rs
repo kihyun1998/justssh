@@ -45,7 +45,7 @@ async fn broker(legacy: PathBuf, log: Log) -> String {
         host_keys,
         tokens,
         Duration::from_secs(15),
-        Arc::new(|_| Caller::new(4242)),
+        Arc::new(|_, _| Caller::new(4242)),
         log,
     ));
     addr

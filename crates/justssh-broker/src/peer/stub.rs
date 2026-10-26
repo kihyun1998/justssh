@@ -5,8 +5,8 @@ use crate::tokens::{Held, Hold};
 
 const UNSUPPORTED: &str = "peer: this is not implemented on this platform";
 
-/// The caller on the other end of `addr`: never measured here.
-pub fn probe(_addr: SocketAddr) -> Caller {
+/// The caller on the other end of `local`: never measured here.
+pub fn probe(_local: SocketAddr, _remote: SocketAddr) -> Caller {
     Caller::measure(Owner::unmeasured(UNSUPPORTED), None, false)
 }
 
