@@ -179,6 +179,8 @@ pub enum KeyFileError {
     NotEncrypted,
     /// The passphrase does not decrypt the key.
     WrongPassphrase,
+    /// The MAC of a file that is not encrypted does not match it.
+    MacMismatch,
     /// The key is encrypted with a cipher or key derivation this crate does not read.
     UnsupportedEncryption(String),
     /// The key derivation asks for more rounds than are allowed.
@@ -205,6 +207,7 @@ impl fmt::Display for KeyFileError {
             }
             KeyFileError::NotEncrypted => f.write_str("the key is not encrypted"),
             KeyFileError::WrongPassphrase => f.write_str("incorrect passphrase"),
+            KeyFileError::MacMismatch => f.write_str("the key file does not verify"),
             KeyFileError::UnsupportedEncryption(name) => {
                 write!(f, "unsupported encryption {name:?}")
             }

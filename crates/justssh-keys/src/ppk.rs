@@ -27,7 +27,8 @@ struct File {
 }
 
 struct Argon2 {
-    flavour: argon2::Algorithm,
+    /// `None` for a name that is no Argon2 flavour.
+    flavour: Option<argon2::Algorithm>,
     memory: u32,
     passes: u32,
     threads: u32,
@@ -58,7 +59,7 @@ pub(crate) fn decode(text: &[u8], passphrase: Option<&[u8]>) -> Result<KeyFile, 
         return Err(if encrypted {
             KeyFileError::WrongPassphrase
         } else {
-            KeyFileError::Malformed
+            KeyFileError::MacMismatch
         });
     }
     let key = build(&file.algorithm, &file.public, &private)?;
@@ -103,10 +104,10 @@ fn parse(text: &[u8]) -> Result<File, KeyFileError> {
     let public = r.block("Public-Lines")?;
     let argon2 = if version == 3 && encryption != "none" {
         let flavour = match r.header("Key-Derivation")? {
-            b"Argon2id" => argon2::Algorithm::Argon2id,
-            b"Argon2i" => argon2::Algorithm::Argon2i,
-            b"Argon2d" => return Err(KeyFileError::UnsupportedEncryption("Argon2d".into())),
-            _ => return Err(KeyFileError::Malformed),
+            b"Argon2id" => Some(argon2::Algorithm::Argon2id),
+            b"Argon2i" => Some(argon2::Algorithm::Argon2i),
+            b"Argon2d" => Some(argon2::Algorithm::Argon2d),
+            _ => None,
         };
         let memory = r.number("Argon2-Memory")?;
         let passes = r.number("Argon2-Passes")?;
@@ -287,10 +288,17 @@ fn derive(file: &File, passphrase: &[u8]) -> Result<Keys, KeyFileError> {
 
 /// The 80 bytes of key, IV and MAC key Argon2 derives from `passphrase` as `a` says.
 fn argon2(a: &Argon2, passphrase: &[u8]) -> Result<Zeroizing<Vec<u8>>, KeyFileError> {
+    let flavour = match a.flavour {
+        Some(argon2::Algorithm::Argon2d) => {
+            return Err(KeyFileError::UnsupportedEncryption("Argon2d".into()));
+        }
+        Some(flavour) => flavour,
+        None => return Err(KeyFileError::Malformed),
+    };
     let params = argon2::Params::new(a.memory, a.passes, a.threads, Some(80))
         .map_err(|_| KeyFileError::Malformed)?;
     let mut out = Zeroizing::new(vec![0; 80]);
-    argon2::Argon2::new(a.flavour, argon2::Version::V0x13, params)
+    argon2::Argon2::new(flavour, argon2::Version::V0x13, params)
         .hash_password_into(passphrase, &a.salt, &mut out)
         .map_err(|_| KeyFileError::Malformed)?;
     Ok(out)
@@ -395,7 +403,7 @@ mod tests {
             ),
         ] {
             let a = Argon2 {
-                flavour,
+                flavour: Some(flavour),
                 memory: 8192,
                 passes: 13,
                 threads: 1,
