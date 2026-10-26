@@ -55,7 +55,7 @@ These follow acwbroker's `pipe.go` `handle`, `cmd/acwbroker/freeze.go` and `main
   - After that, an ISSUE is refused with `frozen` and the session goes on. A second FREEZE is not read.
   - The pipe closing then leaves the process running until the tunnel exits. The tunnel exiting ends the process even with the pipe open, with code 0.
   - Unfrozen, the pipe closing ends the process as before.
-  - A tunnel watch that ends without seeing an exit is a gap, not an exit, as in Go's `hold_windows.go`. So a frozen broker whose watch failed keeps waiting, as Go's does.
+  - A tunnel watch that ends without seeing an exit is a gap, not an exit, as in Go's `hold_windows.go` and `hold_darwin.go`. So a frozen broker whose watch failed keeps waiting, as Go's does.
   - A session thread that ends without reporting (a panic) ends the process with an error. No test reaches either case.
 - **ATTACH:** a malformed one ends the session with `malformed attach`.
   - Its path must be admitted by the shredder: an absolute path to an existing entry directly under an `-attach-root` (repeatable), not a link.
@@ -78,8 +78,7 @@ The session therefore runs on a thread of its own, and the main thread waits for
   - A path already gone is done. A path still failing at the deadline is left for the app's next start to clear.
   - Shredding runs on a thread of its own, since the retries block.
 
-## What is answered without being carried out
-
+## What is absent
 
 Several parts of acwbroker are absent:
 - Memory sealing of held credentials. Credentials are held in zeroizing buffers instead.

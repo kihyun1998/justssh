@@ -31,7 +31,7 @@ The same events as Go, in Go's words:
   - `authenticated` with the caller, the verdict, the admission branch and how many connections are live;
   - `authentication failed` with the user quoted and the refusal in acwbroker's words (`tokens::Refusal`);
   - `upstream authentication failed`.
-- **The caller:** written as Go's `Identity.String` and `Chain.String` write it: `pid=` and `image=` (or why not), `session=`, `user=` on Windows, then `chain=` and why the walk stopped (`Caller::described`).
+- **The caller:** written as Go's `Identity.String` and `Chain.String` write it: `pid=` and `image=` (or why not), `session=`, `user=` on Windows, then `chain=`, each link's terminal as `tty=` on macOS, and why the walk stopped (`Caller::described`).
 - **Handshakes:**
   - `downstream handshake timed out after 3m0s`;
   - `downstream handshake failed`, then what each side offered: the version line and the KEXINIT name-lists. These are kept from the first 16 KiB each way until authentication, as Go's `kexRecorder` keeps them.
