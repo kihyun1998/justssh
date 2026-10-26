@@ -678,6 +678,7 @@ dependencies = [
  "libc",
  "rand_core 0.6.4",
  "rsa",
+ "socket2",
  "subtle",
  "tokio",
  "windows-sys",

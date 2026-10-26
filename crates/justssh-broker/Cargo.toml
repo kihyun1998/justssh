@@ -35,6 +35,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+socket2 = { version = "0.6", features = ["all"] }
 justssh = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-util", "sync", "test-util"] }
 
