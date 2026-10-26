@@ -24,6 +24,17 @@ Records are read as acwbroker's `parseRecords` and `rejectUnknown` read them: an
 
 The checks run in `DecodeIssue`'s order, because the order picks which message a payload with two faults gets. The codec tests carry acwbroker's hand-written goldens, and the blackbox harness's own tests pass against this binary (see below).
 
+## A credential is read on arrival
+
+An ISSUE that parses has its credential read before anything else, before the terminal binding, as acwbroker's `handle` runs `upstream.Check` (#61). `credential::check` goes through the same `private_key` a dial does, as Go's `Check` goes through `authMethods`, so a credential that passes the check is one the dial can read; a certificate bound to another key is caught only by binding it. What it builds is dropped, and a dial reads the key again from the ISSUE's bytes, as Go holds no signer for the life of a token. A password credential is not read.
+
+A refusal is an ERROR with `refusalFor`'s message and a reason record, and the session goes on: `wrong passphrase` (1), `passphrase required` (2), `unsupported private key` (3), `unreadable private key or certificate` (4). The log line is `credential refused on arrival` with the message as `reason` and, as `err`, acwbroker's sentence for the reason (`model.ErrWrongPassphrase` and its siblings) before the cause, as `classify` wraps one in the other; the cause past `upstream: …` is justssh's words, where Go's are x/crypto's. Which reason is Go's `classify`, and some of its turns depend on the format, not on the error alone:
+- Only a PuTTY file's reader names what it does not support. An OpenSSH key under a cipher Go cannot read, an encrypted PKCS#8 block and an X25519 key are all 4, while a PPK of another version, key type or KDF is 3.
+- A PuTTY MAC that fails is 1 when a passphrase came and 4 when none did, even for a file that is not encrypted and so ignores the passphrase (`KeyFileError::MacMismatch`).
+- An empty passphrase is none, as Go tests `len > 0`. Without one, an encrypted OpenSSH or PEM key is 2 before its cipher is looked at. A PPK is read in Go's three stages: its headers, where a cipher other than AES-256-CBC or Argon2 settings over the limit are 3; then the passphrase, 2 without one; then the derivation, where Argon2d is 3 and a name that is no Argon2 flavour is 4.
+
+`tests/credential/check.tsv` is what acwbroker answered for 134 credentials: every key under `justssh-keys/tests` with no, the right and a wrong passphrase; seven PPKs edited to a broken MAC, version 4, `ssh-dss`, Argon2d, a flavour that does not exist, Argon2 memory over the limit and `aes128-cbc`; and certificates for the right key, another key, a plain key and nothing. It was made by running acwbroker's own `Check` and `refusalFor` under `go test -overlay`, which adds a test file to the `handoff` package without touching acwbroker's tree. Two lines differ by the maintainer's choice on #45: a DSA key and an RSA key of three primes, which Go reads and signs with, are 4 here.
+
 ## The upstream must be loopback as Go reads it
 
 The loopback check is Go's `net.SplitHostPort` followed by `net.ParseIP`, ported rather than approximated:
@@ -69,15 +80,13 @@ The session therefore runs on a thread of its own, and the main thread waits for
 
 ## What is answered without being carried out
 
-- **An ISSUE bound to a terminal:** refused with `terminal to bind the token to was not found`. The terminal lookup is macOS-only in acwbroker and is left to #68.
+- **An ISSUE bound to a terminal:** refused with `terminal to bind the token to was not found`, after its credential is read. The terminal lookup is macOS-only in acwbroker and is left to #68.
 
 Several parts of acwbroker are absent:
 - Memory sealing of held credentials. Credentials are held in zeroizing buffers instead.
-- The arrival check that reads a key and names a wrong passphrase.
 - Process hardening.
-- The legacy RSA host key.
 
-`-unsafe-no-harden` is accepted, as Go's `flag` package accepts it, and changes nothing. `-logpath` and `-profile` name the log's folder and every line's profile (`broker-log.md`). `-dial-timeout` bounds the upstream TCP connect, read as Go's `time.ParseDuration` reads it. `-attach-root` names the roots ATTACH paths may be under. The SSH side is in `broker-relay.md`. Token lifetime and caller checks are in `broker-tokens.md`. Key credentials (#61) are still to come.
+`-unsafe-no-harden` is accepted, as Go's `flag` package accepts it, and changes nothing. `-logpath` and `-profile` name the log's folder and every line's profile (`broker-log.md`). `-dial-timeout` bounds the upstream TCP connect, read as Go's `time.ParseDuration` reads it. `-attach-root` names the roots ATTACH paths may be under. The SSH side is in `broker-relay.md`. Token lifetime and caller checks are in `broker-tokens.md`.
 
 ## The host key file
 
@@ -86,6 +95,12 @@ The host key is `-host-key`, or else `<ACRA home>/.store/acwbroker/hostkey`, whe
 The new key is written under a name of its own (`hostkey-<random>.tmp`) and hard-linked into place, so a second start racing the first either reads a whole file or loses the link and reads the winner's. acwbroker measured both simpler shapes failing:
 - A shared temp name made concurrent starts fail on Windows.
 - Exclusive creation of the final name let a loser read an empty file as a corrupt key.
+
+Beside it is `hostkey-rsa`, for clients that know only `ssh-rsa`: acwbroker keeps it for MobaXterm 10.2's SFTP sidebar, whose SecureBlackbox offers only `ssh-rsa` and `ssh-dss`. It is read on each connection, as Go's `serverConfig` reads it, and made on the first connection that finds no file: RSA-2048 from rsa 0.9 (ADR-0004), written and linked as the ed25519 key is. It is offered after the ed25519 key and under `ssh-rsa` alone (Go `NewSignerWithAlgorithms`), so a client offering only `rsa-sha2-256` and `rsa-sha2-512` finds no host key in common. LISTENING announces the ed25519 key only. A file that cannot be read or made is logged at ERROR as `legacy host key unavailable: hostkey: …`, a key that cannot be offered as `ssh-rsa` (an ed25519 key in that file) as `legacy host key unusable: …`, and the connection goes on with the ed25519 key. `tests/hostkey/hostkey-rsa` was written by Go's `MarshalPrivateKey` as acwbroker's `generate` writes it, and a client offering only `ssh-rsa` is shown the public key Go wrote beside it (#61).
+
+Making the key takes seconds unoptimised, and the blackbox starts every broker on an empty folder, so each one makes a key on its first connection. `num-bigint-dig` and `rsa` are built optimised in dev builds (workspace `Cargo.toml`): the test that makes one took 9.2 to 17.9 s without and 0.9 to 3.0 s with, cargo's start included (measured on #61).
+
+The ed25519 key is read once, at start. acwbroker reads it on every connection too, so a file removed while it runs is made again there and not here.
 
 ## Against the blackbox
 
