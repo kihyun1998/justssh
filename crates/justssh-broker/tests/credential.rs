@@ -142,3 +142,37 @@ fn the_key_a_credential_dials_with_is_the_one_its_file_holds() {
     let blob = justssh_keys::certificate_from_line(&cert).unwrap();
     assert_eq!(key.certificate(), Some(&blob[..]));
 }
+
+/// The key parse runs off the async worker (#71): its future yields on the first poll (the work
+/// is handed to a blocking thread), so another task spawned on the same single-threaded runtime
+/// gets to run during the parse. An inline parse would finish in one poll without yielding, and
+/// the other task could not run until it returned.
+#[test]
+fn the_key_parse_yields_the_async_worker() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let iss = issue::decode(&issue(
+        "key",
+        &file("justssh-keys/tests/keys/ed25519-pass"),
+        Some(b"correct horse"),
+        None,
+    ))
+    .unwrap();
+
+    let ran_during_parse = rt.block_on(async move {
+        let flag = Arc::new(AtomicBool::new(false));
+        let other = flag.clone();
+        // Completes on its first poll; it only gets that poll if the parse future yields.
+        tokio::spawn(async move { other.store(true, Ordering::Relaxed) });
+        let key = credential::private_key_off_thread(iss.credential)
+            .await
+            .unwrap();
+        assert!(key.certificate().is_none());
+        flag.load(Ordering::Relaxed)
+    });
+    assert!(ran_during_parse, "the parse did not yield the worker");
+}

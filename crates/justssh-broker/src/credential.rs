@@ -97,6 +97,16 @@ fn bytes(secret: &Option<Zeroizing<Vec<u8>>>) -> &[u8] {
     secret.as_deref().map_or(&[], |s| &s[..])
 }
 
+/// [`private_key`] run on a blocking thread, so a slow bcrypt or Argon2 parse (tens of ms, up
+/// to seconds for a bcrypt key at the round limit) does not hold the async worker while other
+/// connections wait. A parse abandoned when the auth callback is dropped at the deadline runs
+/// to completion on the blocking pool and its key is zeroized unused (#71).
+pub async fn private_key_off_thread(credential: Credential) -> Result<PrivateKey, Refused> {
+    tokio::task::spawn_blocking(move || private_key(&credential))
+        .await
+        .expect("the key parse thread panicked")
+}
+
 /// The key a key or certificate credential signs with, under its certificate for the latter;
 /// an empty passphrase is none.
 pub fn private_key(credential: &Credential) -> Result<PrivateKey, Refused> {
