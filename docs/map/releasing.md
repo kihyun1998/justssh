@@ -27,7 +27,7 @@ crates.io holds one GitHub configuration per crate, not one per repository, so e
 
 Read on 2026-11-02 with `GET https://crates.io/api/v1/trusted_publishing/github_configs?crate=<name>` and the owner's token.
 
-The job names the environment `crates-io`. GitHub creates an environment a job names on its first run, so it needs no setup. Naming `crates-io` on the four crates.io configurations as well would make crates.io refuse a run from any other environment; that is not done.
+The job names the environment `crates-io`. GitHub creates an environment a job names on its first run, so it needed no setup; it appeared with the `v0.1.0` run. Naming `crates-io` on the four crates.io configurations as well would make crates.io refuse a run from any other environment; that is not done.
 
 A Trusted Publisher is configured on a crate that already exists, so a crate name's first publish cannot go this way. 0.1.0 was published by hand on 2026-10-26, with `cargo login` and `cargo publish` in the order above.
 
@@ -48,10 +48,12 @@ The API answers 403 to a request with no `User-Agent`, so the job sends one.
 
 Each `.crate` records the commit it was packaged from in `.cargo_vcs_info.json`. `justssh`, `justssh-keys` and `justssh-tokio` came from `906d26f`, the merge of #85. `justssh-wire` came from `1eb7a6e`, the head of #85 before the merge, which has the same tree.
 
+The tag `v0.1.0` is on `906d26f`. Its run (Actions run 41371538373) used that commit's workflow, which predates the skip, so it ended red at `error: crate justssh-wire@0.1.0 already exists on crates.io index`.
+
 ## How it is proven
 
 The loop was run locally on 2026-11-02 with `cargo publish` replaced by `echo`:
 - at 0.1.0, all four were skipped;
 - with the version changed to 0.1.1, all four went to `cargo publish`, in order.
 
-The OIDC exchange and a publish through it have not run yet. The first tagged run proves them.
+The OIDC exchange has run: on the `v0.1.0` run crates.io gave the token step a token, so it matched the run to its configurations, and the post step revoked it. A publish through the minted token has not run yet; the first release after 0.1.0 proves it.
