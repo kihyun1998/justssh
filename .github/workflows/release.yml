@@ -1,17 +1,8 @@
 name: release
 
-# Publishes the library crates to crates.io via Trusted Publishing: the job proves its
-# identity to crates.io over OIDC and gets a short-lived, publish-only token, so no
-# CRATES_IO_TOKEN secret is stored. Each crate must first have a Trusted Publisher configured
-# on crates.io (owner kihyun1998, repo justssh, workflow release.yml, environment crates-io).
-#
-# A crate name's FIRST-EVER publish cannot use this: Trusted Publishing is configured on an
-# existing crate, so v0.1.0 is published once by hand with `cargo login` + `cargo publish` in
-# dependency order, and this workflow takes over from the next version on.
-#
-# Order is a DAG: justssh-wire -> justssh -> justssh-keys -> justssh-tokio. `cargo publish`
-# waits for each crate to appear in the index before the next resolves it. The broker is
-# publish = false and is not here.
+# Publishes the library crates to crates.io on a v* tag through Trusted Publishing, in
+# dependency order, skipping a crate whose version crates.io already has. How a release is
+# cut and why the workflow is this way: docs/map/releasing.md.
 
 on:
   push:
@@ -43,6 +34,16 @@ jobs:
         run: |
           set -euo pipefail
           for crate in justssh-wire justssh justssh-keys justssh-tokio; do
+            version=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
+            status=$(curl -s -o /dev/null -w '%{http_code}' \
+              -A "justssh-release (https://github.com/kihyun1998/justssh)" \
+              "https://crates.io/api/v1/crates/$crate/$version")
+            case "$status" in
+              200) echo "$crate $version is already on crates.io, skipped"; continue ;;
+              404) ;;
+              *) echo "::error::crates.io answered $status for $crate $version"; exit 1 ;;
+            esac
             echo "::group::cargo publish -p $crate"
             cargo publish -p "$crate"
             echo "::endgroup::"
