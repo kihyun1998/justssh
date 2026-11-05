@@ -93,8 +93,9 @@ impl<'a> KeyQueue<'a> {
 
 /// What [`connect`] asks of the consumer while it connects.
 pub trait ClientHandler {
-    /// Judges the server's host key blob, its signature already verified; `false` ends the
-    /// connection.
+    /// Judges the server's host key blob, its signature already verified: the certificate when a
+    /// certificate algorithm was negotiated, whose own signature and validity are not checked.
+    /// `false` ends the connection.
     fn check_host_key(&mut self, key: &[u8]) -> impl Future<Output = bool>;
 
     /// The answers to a keyboard-interactive request, one for each question, in order.

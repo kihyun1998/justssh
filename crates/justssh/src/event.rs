@@ -41,9 +41,10 @@ pub enum Action {
     /// A client asks to authenticate with a password. Nothing further is processed until the
     /// consumer answers with [`Event::AuthAccepted`] or [`Event::AuthRejected`].
     PasswordRequest(PasswordRequest),
-    /// The server's host key blob, its signature over the exchange hash verified. Nothing
-    /// further is processed until the consumer answers with [`Event::HostKeyAccepted`] or
-    /// [`Event::HostKeyRejected`].
+    /// The server's host key blob, its signature over the exchange hash verified: the
+    /// certificate when a certificate algorithm was negotiated, of which only the key has been
+    /// used. Nothing further is processed until the consumer answers with
+    /// [`Event::HostKeyAccepted`] or [`Event::HostKeyRejected`].
     VerifyHostKey { key: Vec<u8> },
     /// A message the server shows before authentication completes (RFC 4252 §5.4), as sent and
     /// unfiltered.

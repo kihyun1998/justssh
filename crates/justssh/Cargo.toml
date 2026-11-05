@@ -25,6 +25,7 @@ p384.workspace = true
 p521.workspace = true
 ml-kem = { workspace = true, features = ["zeroize"] }
 crypto-bigint = { workspace = true, features = ["zeroize"] }
+dsa.workspace = true
 rsa.workspace = true
 rsa-sha1.workspace = true
 rsa-sha2.workspace = true

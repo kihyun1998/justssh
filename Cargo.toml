@@ -40,6 +40,7 @@ p384 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 p521 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 ml-kem = "0.3"
 crypto-bigint = "0.7"
+dsa = { version = "0.7", default-features = false }
 rsa = "0.9"
 # The digest 0.10 generation rsa 0.9 works with; used only by RSA signing and verification (ADR-0004).
 rsa-sha1 = { package = "sha1", version = "0.10", features = ["oid"] }

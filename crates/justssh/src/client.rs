@@ -76,7 +76,8 @@ impl Client {
         self.transport.session_id()
     }
 
-    /// The server's host key blob, once its signature over the exchange hash has verified.
+    /// The server's host key blob, once its signature over the exchange hash has verified: the
+    /// certificate when a certificate algorithm was negotiated.
     pub fn peer_host_key(&self) -> Option<&[u8]> {
         self.transport.peer_host_key()
     }
