@@ -7,3 +7,9 @@ acwbroker's behaviour is the baseline. If an algorithm Go offers is dropped, the
 Removing an algorithm is a later and deliberate step. It is not done here.
 
 One exception was decided on #11: the client offers Go's default host key algorithms without the certificate algorithms and `ssh-dss`. acwbroker does not check upstream host keys, and an upstream with only a host certificate or only a DSA key is not reached.
+
+## Amendment (2026-11-06): the exception is gone
+
+#87 removes the exception. The client offers Go's `defaultHostKeyAlgos` whole and in Go's order: certificates first, `ssh-dss` just before `ssh-ed25519`. An upstream with only a DSA key would otherwise connect through the Go broker and fail through the Rust one, and acwbroker wants the same list as Go.
+
+The cost falls on a consumer that pins host keys. A server that also has a host certificate is now reached under the certificate, so the consumer sees a different blob. acwbroker does not check host keys and sees no change.

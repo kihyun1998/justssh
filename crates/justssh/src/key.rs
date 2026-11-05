@@ -1,6 +1,7 @@
 //! Private keys for `publickey` authentication and host keys: ed25519, ECDSA over NIST
 //! P-256/384/521 and RSA, each optionally with an OpenSSH certificate (`PROTOCOL.certkeys`); and
-//! the verification of a signature by such a public key.
+//! the verification of a signature by such a public key or an `ssh-dss` one, each optionally
+//! under a certificate.
 
 use core::fmt;
 
@@ -14,6 +15,11 @@ const MIN_RSA_BITS: usize = 1024;
 /// `parseRSA`.
 const MAX_RSA_BITS: usize = 16384;
 const MAX_RSA_EXPONENT_BITS: usize = 24;
+/// The size of a DSA key's modulus and sub-prime, in bits, as x/crypto/ssh's `checkDSAParams`.
+const DSA_P_BITS: usize = 1024;
+const DSA_Q_BITS: usize = 160;
+/// What a certificate format adds to its key type (`PROTOCOL.certkeys`).
+const CERTIFICATE_SUFFIX: &str = "-cert-v01@openssh.com";
 
 /// A NIST curve for an ECDSA key.
 #[non_exhaustive]
@@ -327,7 +333,8 @@ impl fmt::Debug for PrivateKey {
 
 /// Whether `signature`, a signature blob, is a valid signature under public key algorithm
 /// `algorithm` over `data` by the key whose public key blob is `key`. The blob's key type must be
-/// one `algorithm` signs with.
+/// one `algorithm` signs with, and it is a certificate exactly when `algorithm` is a certificate
+/// algorithm; the signature is then by the certified key and named for the underlying algorithm.
 pub(crate) fn verify(key: &[u8], algorithm: &str, signature: &[u8], data: &[u8]) -> bool {
     let mut sig = Reader::new(signature);
     let parsed = (|| {
@@ -339,15 +346,28 @@ pub(crate) fn verify(key: &[u8], algorithm: &str, signature: &[u8], data: &[u8])
     let Some((name, body)) = parsed else {
         return false;
     };
-    if name != algorithm {
+    let signing = underlying(algorithm);
+    if name != signing {
         return false;
     }
     let mut r = Reader::new(key);
-    let Ok(key_type) = r.utf8() else {
+    let Ok(format) = r.utf8() else {
         return false;
     };
-    match (key_type, algorithm) {
+    let (key_type, fields) = match format.strip_suffix(CERTIFICATE_SUFFIX) {
+        Some(key_type) if algorithm != signing => {
+            let Some(fields) = certified_fields(&mut r, key_type) else {
+                return false;
+            };
+            (key_type, fields)
+        }
+        None if algorithm == signing => (format, r.remaining()),
+        _ => return false,
+    };
+    let r = Reader::new(fields);
+    match (key_type, signing) {
         ("ssh-ed25519", "ssh-ed25519") => verify_ed25519(r, body, data),
+        ("ssh-dss", "ssh-dss") => verify_dsa(r, body, data),
         ("ecdsa-sha2-nistp256", "ecdsa-sha2-nistp256") => {
             let Some((point, r, s)) = ecdsa_parts(r, EcdsaCurve::P256, body, 32) else {
                 return false;
@@ -388,7 +408,7 @@ pub(crate) fn verify(key: &[u8], algorithm: &str, signature: &[u8], data: &[u8])
             k.verify(data, &sig).is_ok()
         }
         ("ssh-rsa", "ssh-rsa" | "rsa-sha2-256" | "rsa-sha2-512") => {
-            verify_rsa(r, algorithm, body, data)
+            verify_rsa(r, signing, body, data)
         }
         _ => false,
     }
@@ -408,6 +428,45 @@ fn verify_ed25519(mut r: Reader<'_>, body: &[u8], data: &[u8]) -> bool {
         return false;
     };
     key.verify_strict(data, &ed25519_dalek::Signature::from_bytes(&sig))
+        .is_ok()
+}
+
+/// Verifies a DSA signature over the SHA-1 of `data`: `r || s`, 20 bytes each (RFC 4253 §6.6).
+fn verify_dsa(mut r: Reader<'_>, body: &[u8], data: &[u8]) -> bool {
+    use dsa::signature::hazmat::PrehashVerifier;
+    use sha1::Digest;
+    let uint = |m: &Mpint, bits| dsa::BoxedUint::from_be_slice(&m.magnitude, bits).ok();
+    let key = (|| {
+        let (p, q, g, y) = dsa_fields(&mut r)?;
+        r.finish().ok()?;
+        if q.negative {
+            return None;
+        }
+        let components = dsa::Components::from_components(
+            uint(&p, DSA_P_BITS as u32)?,
+            uint(&q, DSA_Q_BITS as u32)?,
+            uint(&g, DSA_P_BITS as u32)?,
+        )
+        .ok()?;
+        dsa::VerifyingKey::from_components(components, uint(&y, DSA_P_BITS as u32)?).ok()
+    })();
+    let Some(key) = key else {
+        return false;
+    };
+    if body.len() != 40 {
+        return false;
+    }
+    let (rr, ss) = body.split_at(20);
+    let (Ok(rr), Ok(ss)) = (
+        dsa::BoxedUint::from_be_slice(rr, DSA_Q_BITS as u32),
+        dsa::BoxedUint::from_be_slice(ss, DSA_Q_BITS as u32),
+    ) else {
+        return false;
+    };
+    let Some(signature) = dsa::Signature::from_components(rr, ss) else {
+        return false;
+    };
+    key.verify_prehash(&sha1::Sha1::digest(data), &signature)
         .is_ok()
 }
 
@@ -505,7 +564,7 @@ fn underlying(algorithm: &str) -> &str {
         "ssh-rsa-cert-v01@openssh.com" => "ssh-rsa",
         "rsa-sha2-256-cert-v01@openssh.com" => "rsa-sha2-256",
         "rsa-sha2-512-cert-v01@openssh.com" => "rsa-sha2-512",
-        a => a.strip_suffix("-cert-v01@openssh.com").unwrap_or(a),
+        a => a.strip_suffix(CERTIFICATE_SUFFIX).unwrap_or(a),
     }
 }
 
@@ -514,6 +573,25 @@ fn public_fields(blob: &[u8]) -> Vec<u8> {
     let mut r = Reader::new(blob);
     r.string().expect("a key blob starts with its type");
     r.remaining().to_vec()
+}
+
+/// The key fields of a certificate of key type `key_type`, `r` being just after the certificate's
+/// format: the rest of the certificate is read as [`certificate_rest`] reads it.
+fn certified_fields<'a>(r: &mut Reader<'a>, key_type: &str) -> Option<&'a [u8]> {
+    let count = match key_type {
+        "ssh-ed25519" => 1,
+        "ssh-rsa" | "ecdsa-sha2-nistp256" | "ecdsa-sha2-nistp384" | "ecdsa-sha2-nistp521" => 2,
+        "ssh-dss" => 4,
+        _ => return None,
+    };
+    r.string().ok()?;
+    let start = r.remaining();
+    for _ in 0..count {
+        r.string().ok()?;
+    }
+    let fields = &start[..start.len() - r.remaining().len()];
+    certificate_rest(r)?;
+    Some(fields)
 }
 
 /// The fields of a certificate after its key, read as x/crypto/ssh's `parseCert` reads them:
@@ -592,16 +670,7 @@ fn signature_key(blob: &[u8]) -> Option<()> {
             }
         }
         b"ssh-dss" => {
-            let (p, q, g, y) = (
-                Mpint::read(&mut r)?,
-                Mpint::read(&mut r)?,
-                Mpint::read(&mut r)?,
-                Mpint::read(&mut r)?,
-            );
-            let in_group = |x: &Mpint| !x.negative && x.bits() > 0 && x.below(&p);
-            if p.negative || p.bits() != 1024 || q.bits() != 160 || !in_group(&g) || !in_group(&y) {
-                return None;
-            }
+            dsa_fields(&mut r)?;
         }
         name @ (b"ecdsa-sha2-nistp256" | b"ecdsa-sha2-nistp384" | b"ecdsa-sha2-nistp521") => {
             let curve = &name[b"ecdsa-sha2-".len()..];
@@ -616,6 +685,20 @@ fn signature_key(blob: &[u8]) -> Option<()> {
         _ => return None,
     }
     r.finish().ok()
+}
+
+/// A DSA key's `p`, `q`, `g` and `y`, of the sizes and ranges x/crypto/ssh's `parseDSA` takes. It
+/// takes a negative `q` here, and such a key verifies nothing.
+fn dsa_fields(r: &mut Reader<'_>) -> Option<(Mpint, Mpint, Mpint, Mpint)> {
+    let (p, q, g, y) = (
+        Mpint::read(r)?,
+        Mpint::read(r)?,
+        Mpint::read(r)?,
+        Mpint::read(r)?,
+    );
+    let in_group = |x: &Mpint| !x.negative && x.bits() > 0 && x.below(&p);
+    let sized = !p.negative && p.bits() == DSA_P_BITS && q.bits() == DSA_Q_BITS;
+    (sized && in_group(&g) && in_group(&y)).then_some((p, q, g, y))
 }
 
 /// An uncompressed point on `curve`, as Go's `elliptic.Unmarshal` takes it.
@@ -713,3 +796,297 @@ impl rsa_rand_core::RngCore for OldRng<'_> {
 }
 
 impl rsa_rand_core::CryptoRng for OldRng<'_> {}
+
+#[cfg(test)]
+#[path = "../tests/common/certs.rs"]
+mod certs;
+#[cfg(test)]
+#[path = "../tests/common/test_keys.rs"]
+mod test_keys;
+
+#[cfg(test)]
+mod tests {
+    use rand_core::UnwrapErr;
+
+    use super::*;
+
+    /// A DSA key from Go's `crypto/dsa` and its signature over [`DSA_DATA`].
+    const DSA_P: &str = "fdca8374555fdb415eb8ab7ffd047b1d10453a1d40aa9de23ca9f6a37471227b88bb85c5b3d014632c67e92f4ddce3b668a74012f5d95954ebcb98ffadf597cb3b147d528ea9b2765d65db0306938dc629bfeb04b4d3a543255a3aa66bcfbdb4d98f96e7a40df69140204fa73fc69cbd2811939d78fd2f4f6092c29727fc469d";
+    const DSA_Q: &str = "9db9dc15d5a5d1db8e3c0caf0e5c3c0a7f1b3abb";
+    const DSA_G: &str = "401045f7e7e95ca9e0b5884701d1b4c346612dbedb7a6531e8e0e94cf519a9b7377060bf8d9cd1e4da78d0155f60f7057c91541cd1167da1002067f1edebdeaa753b0ea326fc26766ea5719d140b2d4d0148fb7122d615b9748a495123822e9f0639c7ae929337726ebff5d7a1797512ed5ed256d3e865a1a044894d411b4b88";
+    const DSA_Y: &str = "e9acc189d64b6ce57b909bc946409950fa832f862aeeb7ea1dc3e2d5d080ac33f0bd9dc460b20f4f8af7884476679f2d68c0cb91bbc6d004de42e5f72ee1f82fec7718b72b73c600c14b5ea752e510efc20406df178a5dbbae9721ff46143cf2341b8e262a09d22b1f54b213d5708c16545c69b2379865014a635dfcdfdfbd95";
+    const DSA_R: &str = "419eb3f2ed68d28ad906c272bb60e7595b03943e";
+    const DSA_S: &str = "24bb44a587d9c43a7ae389ffd91ea6b2835236e6";
+    const DSA_DATA: &[u8] = b"the exchange hash";
+
+    const DATA: &[u8] = b"some exchange hash";
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// The fields of a DSA public key blob after its type.
+    fn dsa_fields_of(p: &[u8], q: &[u8], g: &[u8], y: &[u8]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.mpint_unsigned(p)
+            .mpint_unsigned(q)
+            .mpint_unsigned(g)
+            .mpint_unsigned(y);
+        w.into_bytes()
+    }
+
+    fn good_dsa_fields() -> Vec<u8> {
+        dsa_fields_of(&hex(DSA_P), &hex(DSA_Q), &hex(DSA_G), &hex(DSA_Y))
+    }
+
+    fn dsa_blob(fields: &[u8]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.string(b"ssh-dss").bytes(fields);
+        w.into_bytes()
+    }
+
+    fn signature_blob(name: &str, body: &[u8]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.string(name.as_bytes()).string(body);
+        w.into_bytes()
+    }
+
+    fn dsa_signature() -> Vec<u8> {
+        signature_blob("ssh-dss", &[hex(DSA_R), hex(DSA_S)].concat())
+    }
+
+    /// A host certificate of format `format` for the key whose fields after its type are `fields`.
+    fn certificate(format: &str, fields: &[u8]) -> Vec<u8> {
+        let mut ca = Writer::new();
+        ca.string(b"ssh-ed25519").string(&[8; 32]);
+        let mut w = Writer::new();
+        w.string(format.as_bytes())
+            .string(&[0; 32])
+            .bytes(fields)
+            .bytes(&[0; 8])
+            .u32(2)
+            .string(b"host")
+            .string(b"")
+            .bytes(&[0; 8])
+            .bytes(&[0xff; 8])
+            .string(b"")
+            .string(b"")
+            .string(b"")
+            .string(&ca.into_bytes())
+            .string(&signature_blob("ssh-ed25519", &[1; 64]));
+        w.into_bytes()
+    }
+
+    fn sign(key: &PrivateKey, algorithm: &str, data: &[u8]) -> Vec<u8> {
+        key.sign(algorithm, data, &mut UnwrapErr(getrandom::SysRng))
+    }
+
+    fn signature_body(signature: &[u8]) -> Vec<u8> {
+        let mut r = Reader::new(signature);
+        r.string().unwrap();
+        r.string().unwrap().to_vec()
+    }
+
+    fn rsa_key() -> PrivateKey {
+        PrivateKey::rsa(
+            &hex(super::test_keys::RSA_N),
+            &hex(super::test_keys::RSA_E),
+            Zeroizing::new(hex(super::test_keys::RSA_D)),
+            Zeroizing::new(hex(super::test_keys::RSA_P)),
+            Zeroizing::new(hex(super::test_keys::RSA_Q)),
+        )
+        .unwrap()
+    }
+
+    fn ed25519_key() -> PrivateKey {
+        PrivateKey::ed25519(Zeroizing::new([9; 32]))
+    }
+
+    fn ecdsa_key(curve: EcdsaCurve, len: usize) -> PrivateKey {
+        PrivateKey::ecdsa(curve, Zeroizing::new(vec![1; len])).unwrap()
+    }
+
+    #[test]
+    fn a_dsa_signature_from_go_verifies_and_a_changed_one_does_not() {
+        let key = dsa_blob(&good_dsa_fields());
+        assert!(verify(&key, "ssh-dss", &dsa_signature(), DSA_DATA));
+        assert!(!verify(&key, "ssh-dss", &dsa_signature(), b"other data"));
+        let mut changed = dsa_signature();
+        *changed.last_mut().unwrap() ^= 1;
+        assert!(!verify(&key, "ssh-dss", &changed, DSA_DATA));
+    }
+
+    #[test]
+    fn a_dsa_signature_is_exactly_forty_bytes_named_ssh_dss() {
+        let key = dsa_blob(&good_dsa_fields());
+        let body = [hex(DSA_R), hex(DSA_S)].concat();
+        let long = [&[0][..], &body].concat();
+        let s_widened = [&body[..20], &[0], &body[20..]].concat();
+        for bad in [&body[..39], &long, &s_widened, &[0; 40]] {
+            let signature = signature_blob("ssh-dss", bad);
+            assert!(!verify(&key, "ssh-dss", &signature, DSA_DATA));
+        }
+        let renamed = signature_blob("ssh-rsa", &body);
+        assert!(!verify(&key, "ssh-dss", &renamed, DSA_DATA));
+        assert!(!verify(&key, "ssh-rsa", &renamed, DSA_DATA));
+    }
+
+    #[test]
+    fn a_dsa_key_a_hostile_server_can_send_is_refused_without_a_panic() {
+        let (p, q, g, y) = (hex(DSA_P), hex(DSA_Q), hex(DSA_G), hex(DSA_Y));
+        let mut p_minus_1 = p.clone();
+        *p_minus_1.last_mut().unwrap() -= 1;
+        let mut even_q = q.clone();
+        *even_q.last_mut().unwrap() &= 0xfe;
+        let short_p = [&[0x7f][..], &p[1..]].concat();
+        let short_q = [&[0x7f][..], &q[1..]].concat();
+        let long_p = [p.as_slice(), &p].concat();
+        let mut q_negated = vec![0xff];
+        q_negated.extend(q.iter().map(|b| !b));
+        for b in q_negated.iter_mut().rev() {
+            *b = b.wrapping_add(1);
+            if *b != 0 {
+                break;
+            }
+        }
+        let mut negative_q = Writer::new();
+        negative_q.mpint_unsigned(&p).string(&q_negated);
+        negative_q.mpint_unsigned(&g).mpint_unsigned(&y);
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("p of 1023 bits", dsa_fields_of(&short_p, &q, &g, &y)),
+            ("p of 2048 bits", dsa_fields_of(&long_p, &q, &g, &y)),
+            ("even p", dsa_fields_of(&p_minus_1, &q, &g, &y)),
+            ("q of 159 bits", dsa_fields_of(&p, &short_q, &g, &y)),
+            ("q of 256 bits", dsa_fields_of(&p, &[0x80; 32], &g, &y)),
+            ("negative q", negative_q.into_bytes()),
+            ("even q", dsa_fields_of(&p, &even_q, &g, &y)),
+            (
+                "even q, y of order 2",
+                dsa_fields_of(&p, &even_q, &g, &p_minus_1),
+            ),
+            ("zero g", dsa_fields_of(&p, &q, &[], &y)),
+            ("g above p", dsa_fields_of(&p, &q, &[0xff; 128], &y)),
+            ("zero y", dsa_fields_of(&p, &q, &g, &[])),
+            ("y of 1", dsa_fields_of(&p, &q, &g, &[1])),
+            ("y above p", dsa_fields_of(&p, &q, &g, &[0xff; 128])),
+            ("y outside the group", dsa_fields_of(&p, &q, &g, &[2])),
+            ("a byte after y", [good_dsa_fields(), vec![0]].concat()),
+        ];
+        for (name, fields) in cases {
+            assert!(
+                !verify(&dsa_blob(&fields), "ssh-dss", &dsa_signature(), DSA_DATA),
+                "{name}"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        /// `y = p - 1` has order 2 for any odd `p`, so with an even `q` the key is taken and the
+        /// verification runs on numbers that are not a DSA group.
+        #[test]
+        fn dsa_verification_of_numbers_that_are_no_group_ends_without_a_panic(
+            p in proptest::collection::vec(proptest::prelude::any::<u8>(), 128),
+            q in proptest::collection::vec(proptest::prelude::any::<u8>(), 20),
+            g in proptest::collection::vec(proptest::prelude::any::<u8>(), 127),
+            body in proptest::collection::vec(proptest::prelude::any::<u8>(), 40),
+        ) {
+            let mut p = p;
+            p[0] |= 0x80;
+            p[127] |= 1;
+            let mut y = p.clone();
+            y[127] &= 0xfe;
+            let mut q = q;
+            q[0] |= 0x80;
+            q[19] &= 0xfe;
+            let blob = dsa_blob(&dsa_fields_of(&p, &q, &g, &y));
+            verify(&blob, "ssh-dss", &signature_blob("ssh-dss", &body), DATA);
+        }
+    }
+
+    #[test]
+    fn a_certificate_verifies_by_the_key_inside_it_under_each_algorithm() {
+        let ed25519 = "ssh-ed25519-cert-v01@openssh.com";
+        let p256 = "ecdsa-sha2-nistp256-cert-v01@openssh.com";
+        let p384 = "ecdsa-sha2-nistp384-cert-v01@openssh.com";
+        let p521 = "ecdsa-sha2-nistp521-cert-v01@openssh.com";
+        let rsa = "ssh-rsa-cert-v01@openssh.com";
+        for (key, format, algorithm) in [
+            (ed25519_key(), ed25519, ed25519),
+            (ecdsa_key(EcdsaCurve::P256, 32), p256, p256),
+            (ecdsa_key(EcdsaCurve::P384, 48), p384, p384),
+            (ecdsa_key(EcdsaCurve::P521, 66), p521, p521),
+            (rsa_key(), rsa, "rsa-sha2-256-cert-v01@openssh.com"),
+            (rsa_key(), rsa, "rsa-sha2-512-cert-v01@openssh.com"),
+            (rsa_key(), rsa, rsa),
+        ] {
+            let plain = key.plain_public_blob();
+            let blob = certificate(format, &public_fields(&plain));
+            let signature = sign(&key, algorithm, DATA);
+            assert!(verify(&blob, algorithm, &signature, DATA), "{algorithm}");
+            assert!(
+                !verify(&blob, algorithm, &signature, b"other"),
+                "{algorithm}"
+            );
+            assert!(
+                !verify(&blob, underlying(algorithm), &signature, DATA),
+                "{algorithm}: a certificate under the plain algorithm"
+            );
+            assert!(
+                !verify(&plain, algorithm, &signature, DATA),
+                "{algorithm}: a plain key under the certificate algorithm"
+            );
+        }
+        let dss = "ssh-dss-cert-v01@openssh.com";
+        let blob = certificate(dss, &good_dsa_fields());
+        assert!(verify(&blob, dss, &dsa_signature(), DSA_DATA));
+        assert!(!verify(&blob, dss, &dsa_signature(), b"other"));
+    }
+
+    #[test]
+    fn a_signature_under_a_certificate_is_named_for_the_negotiated_underlying_algorithm() {
+        let key = rsa_key();
+        let fields = public_fields(&key.plain_public_blob());
+        let blob = certificate("ssh-rsa-cert-v01@openssh.com", &fields);
+        let algorithm = "rsa-sha2-256-cert-v01@openssh.com";
+        let other_hash = sign(&key, "rsa-sha2-512", DATA);
+        assert!(!verify(&blob, algorithm, &other_hash, DATA));
+        let body = signature_body(&sign(&key, "rsa-sha2-256", DATA));
+        let named_for_the_certificate = signature_blob(algorithm, &body);
+        assert!(!verify(&blob, algorithm, &named_for_the_certificate, DATA));
+    }
+
+    #[test]
+    fn a_certificate_of_another_key_type_than_negotiated_is_refused() {
+        let key = ed25519_key();
+        let fields = public_fields(&key.plain_public_blob());
+        let signature = sign(&key, "ssh-ed25519", DATA);
+        let blob = certificate("ssh-ed25519-cert-v01@openssh.com", &fields);
+        let other = "ecdsa-sha2-nistp256-cert-v01@openssh.com";
+        assert!(!verify(&blob, other, &signature, DATA));
+        let unknown = certificate("sk-ssh-ed25519-cert-v01@openssh.com", &fields);
+        let algorithm = "ssh-ed25519-cert-v01@openssh.com";
+        assert!(!verify(&unknown, algorithm, &signature, DATA));
+    }
+
+    #[test]
+    fn a_host_certificate_is_read_by_the_rules_of_with_certificate_and_go() {
+        let key = ed25519_key();
+        let algorithm = "ssh-ed25519-cert-v01@openssh.com";
+        let signature = sign(&key, algorithm, DATA);
+        for (name, blob, go_takes) in super::certs::variants() {
+            assert_eq!(
+                verify(&blob, algorithm, &signature, DATA),
+                go_takes,
+                "{name}"
+            );
+            assert_eq!(
+                ed25519_key().with_certificate(blob).is_ok(),
+                go_takes,
+                "{name}: with_certificate"
+            );
+        }
+    }
+}

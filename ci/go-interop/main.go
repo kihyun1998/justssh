@@ -19,12 +19,15 @@
 //
 //	ed25519   ed25519 from a seed of 32 bytes of 7 (the default)
 //	broker    that key, then a new RSA-2048 key offered only as ssh-rsa, as acwbroker does
-//	all       that key, a new RSA-2048 key, and new ECDSA P-256, P-384 and P-521 keys
+//	all       that key, a new RSA-2048 key, new ECDSA P-256, P-384 and P-521 keys and a new DSA key
+//	dsa       a new DSA key alone
+//	certs     the keys of all, each under a host certificate signed by the ed25519 key
 //
 // The exit status is 0 once the connection is authenticated.
 package main
 
 import (
+	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -59,7 +62,7 @@ func main() {
 	kex := fs.String("kex", "", "key exchanges, comma-separated")
 	cipher := fs.String("cipher", "", "ciphers, comma-separated")
 	mac := fs.String("mac", "", "MACs, comma-separated")
-	hostKeys := fs.String("hostkeys", "ed25519", "server host keys: ed25519, broker or all")
+	hostKeys := fs.String("hostkeys", "ed25519", "server host keys: ed25519, broker, all, dsa or certs")
 	hostKeyAlgs := fs.String("hostkeyalgs", "", "client host key algorithms, comma-separated")
 	rekey := fs.Uint64("rekey", 0, "RekeyThreshold in bytes")
 	requests := fs.Int("requests", 0, "global requests the client sends (client)")
@@ -119,16 +122,23 @@ func signers(hostKeys string) ([]ssh.Signer, error) {
 	for i := range seed {
 		seed[i] = 7
 	}
-	keys := []any{ed25519.NewKeyFromSeed(seed)}
+	ca := ed25519.NewKeyFromSeed(seed)
+	keys := []any{ca}
 	switch hostKeys {
 	case "ed25519":
-	case "broker", "all":
+	case "dsa":
+		d, err := newDSAKey()
+		if err != nil {
+			return nil, err
+		}
+		keys = []any{d}
+	case "broker", "all", "certs":
 		r, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
 			return nil, err
 		}
 		keys = append(keys, r)
-		if hostKeys == "all" {
+		if hostKeys != "broker" {
 			for _, c := range []elliptic.Curve{elliptic.P256(), elliptic.P384(), elliptic.P521()} {
 				k, err := ecdsa.GenerateKey(c, rand.Reader)
 				if err != nil {
@@ -136,6 +146,11 @@ func signers(hostKeys string) ([]ssh.Signer, error) {
 				}
 				keys = append(keys, k)
 			}
+			d, err := newDSAKey()
+			if err != nil {
+				return nil, err
+			}
+			keys = append(keys, d)
 		}
 	default:
 		return nil, fmt.Errorf("unknown -hostkeys %q", hostKeys)
@@ -152,9 +167,45 @@ func signers(hostKeys string) ([]ssh.Signer, error) {
 				return nil, err
 			}
 		}
+		if hostKeys == "certs" {
+			s, err = hostCertSigner(s, ca)
+			if err != nil {
+				return nil, err
+			}
+		}
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// newDSAKey generates a DSA key of the one size SSH uses: 1024 bits with a 160-bit sub-prime.
+func newDSAKey() (*dsa.PrivateKey, error) {
+	k := new(dsa.PrivateKey)
+	if err := dsa.GenerateParameters(&k.Parameters, rand.Reader, dsa.L1024N160); err != nil {
+		return nil, err
+	}
+	if err := dsa.GenerateKey(k, rand.Reader); err != nil {
+		return nil, err
+	}
+	return k, nil
+}
+
+// hostCertSigner returns s under a host certificate for its key, signed by ca.
+func hostCertSigner(s ssh.Signer, ca ed25519.PrivateKey) (ssh.Signer, error) {
+	authority, err := ssh.NewSignerFromKey(ca)
+	if err != nil {
+		return nil, err
+	}
+	cert := &ssh.Certificate{
+		Key:             s.PublicKey(),
+		CertType:        ssh.HostCert,
+		ValidPrincipals: []string{"127.0.0.1"},
+		ValidBefore:     ssh.CertTimeInfinity,
+	}
+	if err := cert.SignCert(rand.Reader, authority); err != nil {
+		return nil, err
+	}
+	return ssh.NewCertSigner(cert, s)
 }
 
 func serve(algorithms ssh.Config, hostKeys string, stay bool, reject string) error {

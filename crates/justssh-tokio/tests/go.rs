@@ -406,13 +406,12 @@ async fn a_go_client_verifies_each_host_key_algorithm_of_the_server() {
     }
 }
 
-#[tokio::test]
-async fn the_client_verifies_each_host_key_algorithm_of_a_go_server() {
-    let Some(go) = harness() else { return };
-    for algorithm in HOST_KEY_ALGORITHMS {
+/// Connects to a Go server with `-hostkeys hostkeys`, offering only each of `algorithms`.
+async fn verify_each(go: &PathBuf, hostkeys: &str, algorithms: &[&str]) {
+    for algorithm in algorithms {
         let client = go_server_with(
-            &go,
-            vec!["-hostkeys".into(), "all".into()],
+            go,
+            vec!["-hostkeys".into(), hostkeys.into()],
             ClientConfig::builder(b"alice")
                 .host_key_algorithms(&[algorithm])
                 .build(),
@@ -426,13 +425,67 @@ async fn the_client_verifies_each_host_key_algorithm_of_a_go_server() {
 }
 
 #[tokio::test]
-async fn the_client_offers_a_go_clients_host_key_algorithms_without_certificates_and_dsa() {
+async fn the_client_verifies_each_host_key_algorithm_of_a_go_server() {
+    let Some(go) = harness() else { return };
+    verify_each(&go, "all", HOST_KEY_ALGORITHMS).await;
+    verify_each(&go, "all", &["ssh-dss"]).await;
+}
+
+#[tokio::test]
+async fn the_client_verifies_each_host_certificate_algorithm_of_a_go_server() {
+    let Some(go) = harness() else { return };
+    verify_each(
+        &go,
+        "certs",
+        &[
+            "rsa-sha2-256-cert-v01@openssh.com",
+            "rsa-sha2-512-cert-v01@openssh.com",
+            "ssh-rsa-cert-v01@openssh.com",
+            "ssh-dss-cert-v01@openssh.com",
+            "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+            "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+            "ecdsa-sha2-nistp521-cert-v01@openssh.com",
+            "ssh-ed25519-cert-v01@openssh.com",
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_default_client_reaches_a_go_server_whose_only_host_key_is_dsa() {
+    let Some(go) = harness() else { return };
+    let client = go_server_with(
+        &go,
+        vec!["-hostkeys".into(), "dsa".into()],
+        ClientConfig::builder(b"alice").build(),
+    )
+    .await;
+    assert_eq!(
+        client.handshake().negotiated().unwrap().host_key(),
+        "ssh-dss"
+    );
+}
+
+#[tokio::test]
+async fn the_default_client_negotiates_a_go_servers_certificate_before_its_plain_keys() {
+    let Some(go) = harness() else { return };
+    let client = go_server_with(
+        &go,
+        vec!["-hostkeys".into(), "certs".into()],
+        ClientConfig::builder(b"alice").build(),
+    )
+    .await;
+    assert_eq!(
+        client.handshake().negotiated().unwrap().host_key(),
+        "rsa-sha2-256-cert-v01@openssh.com"
+    );
+}
+
+#[tokio::test]
+async fn the_client_offers_a_go_clients_host_key_algorithms() {
     let Some(go) = harness() else { return };
     let server = go_client(&go, "", "", "").await;
-    let go_offers: Vec<String> = host_key_algorithms(server.handshake().peer_kexinit().unwrap())
-        .into_iter()
-        .filter(|a| !a.contains("-cert-") && a != "ssh-dss")
-        .collect();
+    let go_offers = host_key_algorithms(server.handshake().peer_kexinit().unwrap());
     let client = go_server(&go, "", "", "").await;
     let we_offer = host_key_algorithms(client.handshake().local_kexinit().unwrap());
     assert_eq!(we_offer, go_offers);
