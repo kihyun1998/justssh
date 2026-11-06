@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "justssh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "justssh-broker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.4.3",
  "justssh",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "justssh-keys"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "argon2",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "justssh-tokio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64ct",
  "justssh",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "justssh-wire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
 ]
