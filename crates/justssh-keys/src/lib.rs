@@ -159,10 +159,10 @@ fn crt_coefficient(p: &[u8], q: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
 }
 
 /// A secret big-endian integer, reversed in a zeroizing buffer so that no plain copy is left.
-pub(crate) fn secret_uint(be: &[u8]) -> rsa::BigUint {
+pub(crate) fn secret_uint(be: &[u8]) -> num_bigint_dig::BigUint {
     let mut le = Zeroizing::new(be.to_vec());
     le.reverse();
-    rsa::BigUint::from_bytes_le(&le)
+    num_bigint_dig::BigUint::from_bytes_le(&le)
 }
 
 /// Why a key file was not read.

@@ -17,3 +17,11 @@ The first coexistence build (#2) showed that pinning to stable releases does not
 The general case: a dependency that pins a release candidate conflicts with anyone who has moved to the stable release in the same range. Avoiding release candidates ourselves cannot prevent that.
 
 What guarantees coexistence is the coexistence build. It targets the IronRDP the broker will ship with, which is Devolutions/IronRDP master pinned to a revision (`66bfd60`, 2026-10-20, picky rc.26), not the latest crates.io release. That revision builds with justssh, and the pin is raised by hand.
+
+## Amendment (2026-11-18): rsa 0.10, and coexistence with IronRDP stays on 0.2
+
+rsa 0.10.0 is released as stable, the first release outside RUSTSEC-2023-0071. justssh takes it from 0.3.0, and the digest 0.10 generation that rsa 0.9 brought is gone.
+
+IronRDP does not build with it yet. picky and sspi, which IronRDP uses, pin `rsa =0.10.0-rc.18` and `pkcs1 =0.8.0-rc.4`, and rsa 0.10.0 requires pkcs1 0.8.0, which falls in the same Cargo range as that release candidate. IronRDP master `abfc97b` (2026-11-17) still locks those versions.
+
+The maintainer chose on #90 to move anyway. A binary that needs justssh and IronRDP together stays on justssh 0.2.x, which uses rsa 0.9, until picky and sspi take rsa 0.10.0 (Devolutions/picky-rs#598 proposes it for picky). The coexistence build is removed, because it can only fail until then; `ci/coexist` and its CI job are in the history for when IronRDP catches up.

@@ -12,7 +12,7 @@
 | OpenSSH `PROTOCOL`·`PROTOCOL.*` (strict-kex 포함) | how it works | openssh-portable 소스 트리 — raw | binding |
 | x/crypto/ssh | how it works (acwbroker 현재 동작) | 소스 트리 — raw | binding: acwbroker가 관측할 수 있는 동작에 한함 |
 | acwbroker `blackbox/` | 완료 판정 | acwbroker 저장소 — raw | binding: Go 기준과 상류 payload 바이트가 같아야 함. tail(stderr·exit-status) 판정은 OpenSSH 클라로 (plink 0.83은 직결에서도 잃음) |
-| IronRDP · sspi | 의존성 버전 제약 | 각 Cargo.toml / Cargo.lock — raw | binding |
+| IronRDP · sspi | 의존성 버전 제약 | 각 Cargo.toml / Cargo.lock — raw | binding: justssh 0.2.x까지. 0.3부터는 공존을 보장하지 않음 (ADR-0004) |
 | justrdp | how it works · where files go | 소스 트리 — raw | example |
 | russh | how it works (구조) | 소스 트리 — raw | example |
 | puressh | how it works (원시 요청 보존) | 소스 트리 — raw | example |
