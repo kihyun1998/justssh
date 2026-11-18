@@ -14,6 +14,7 @@ getrandom = { workspace = true, features = ["sys_rng"] }
 zeroize.workspace = true
 subtle.workspace = true
 rsa.workspace = true
+rsa-rand-core.workspace = true
 justssh-tokio = { path = "../justssh-tokio" }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-util", "sync"] }
 

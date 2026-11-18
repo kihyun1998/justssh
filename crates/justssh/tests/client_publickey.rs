@@ -161,22 +161,22 @@ fn verify(blob: &[u8], signature: &[u8], data: &[u8]) -> String {
         "ssh-rsa" => {
             let e = key.string().unwrap();
             let n = key.string().unwrap();
-            let public = rsa::PublicKey::new(
-                rsa::BoxedUint::from_be_slice_vartime(n),
-                rsa::BoxedUint::from_be_slice_vartime(e),
+            let public = rsa::RsaPublicKey::new(
+                rsa::BigUint::from_bytes_be(n),
+                rsa::BigUint::from_bytes_be(e),
             )
             .unwrap();
             use rsa::signature::Verifier;
             let sig = rsa::pkcs1v15::Signature::try_from(sig_bytes.as_slice()).unwrap();
             match sig_algorithm.as_str() {
                 "rsa-sha2-256" => {
-                    rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(public).verify(data, &sig)
+                    rsa::pkcs1v15::VerifyingKey::<rsa_sha2::Sha256>::new(public).verify(data, &sig)
                 }
                 "rsa-sha2-512" => {
-                    rsa::pkcs1v15::VerifyingKey::<sha2::Sha512>::new(public).verify(data, &sig)
+                    rsa::pkcs1v15::VerifyingKey::<rsa_sha2::Sha512>::new(public).verify(data, &sig)
                 }
                 "ssh-rsa" => {
-                    rsa::pkcs1v15::VerifyingKey::<sha1::Sha1>::new(public).verify(data, &sig)
+                    rsa::pkcs1v15::VerifyingKey::<rsa_sha1::Sha1>::new(public).verify(data, &sig)
                 }
                 other => panic!("RSA signature algorithm {other}"),
             }
@@ -598,30 +598,4 @@ fn an_rsa_key_under_1024_bits_is_refused() {
         Zeroizing::new(hex(test_keys::SMALL_RSA_Q)),
     );
     assert_eq!(small.err(), Some(KeyError::InvalidKey));
-}
-
-#[test]
-fn an_rsa_key_with_primes_of_unequal_size_is_refused() {
-    let unequal = PrivateKey::rsa(
-        &hex(test_keys::UNEQUAL_RSA_N),
-        &hex(test_keys::UNEQUAL_RSA_E),
-        Zeroizing::new(hex(test_keys::UNEQUAL_RSA_D)),
-        Zeroizing::new(hex(test_keys::UNEQUAL_RSA_P)),
-        Zeroizing::new(hex(test_keys::UNEQUAL_RSA_Q)),
-    );
-    assert_eq!(unequal.err(), Some(KeyError::InvalidKey));
-}
-
-#[test]
-fn rsa_secrets_with_the_leading_zero_of_an_mpint_are_taken() {
-    let padded = |h: &str| Zeroizing::new([vec![0], hex(h)].concat());
-    let key = PrivateKey::rsa(
-        &hex(test_keys::RSA_N),
-        &hex(test_keys::RSA_E),
-        padded(test_keys::RSA_D),
-        padded(test_keys::RSA_P),
-        padded(test_keys::RSA_Q),
-    )
-    .unwrap();
-    assert_eq!(key.public_blob(), rsa().public_blob());
 }

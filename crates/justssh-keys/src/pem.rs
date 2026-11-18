@@ -275,7 +275,7 @@ fn hex(text: &[u8]) -> Option<Vec<u8>> {
 /// A PKCS#1 `RSAPrivateKey` with two primes.
 fn pkcs1(der: &[u8]) -> Result<KeyFile, KeyFileError> {
     use rsa::pkcs1::der::Decode;
-    let key = rsa::pkcs1::RsaPrivateKeyRef::from_der(der).map_err(|_| KeyFileError::Malformed)?;
+    let key = rsa::pkcs1::RsaPrivateKey::from_der(der).map_err(|_| KeyFileError::Malformed)?;
     if key.other_prime_infos.is_some() {
         return Err(KeyFileError::UnsupportedKeyType("multi-prime RSA".into()));
     }
