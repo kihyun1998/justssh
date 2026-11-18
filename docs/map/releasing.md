@@ -56,4 +56,4 @@ The loop was run locally on 2026-11-02 with `cargo publish` replaced by `echo`:
 - at 0.1.0, all four were skipped;
 - with the version changed to 0.1.1, all four went to `cargo publish`, in order.
 
-The OIDC exchange has run: on the `v0.1.0` run crates.io gave the token step a token, so it matched the run to its configurations, and the post step revoked it. A publish through the minted token has not run yet; the first release after 0.1.0 proves it.
+The OIDC exchange has run: on the `v0.1.0` run crates.io gave the token step a token, so it matched the run to its configurations, and the post step revoked it. Publishing through the minted token has run too: the `v0.2.0` (run 42139898359) and `v0.3.0` (run 44223469190) runs published all four crates.
