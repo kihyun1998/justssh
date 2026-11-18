@@ -114,48 +114,21 @@ fn ed25519() -> Result<KeyFile, String> {
 
 fn rsa() -> Result<KeyFile, String> {
     use rsa::traits::{PrivateKeyParts, PublicKeyParts};
-    let key = rsa::RsaPrivateKey::new(&mut OsRng, 2048).map_err(|e| format!("generating: {e}"))?;
+    let key = rsa::PrivateKey::new(&mut getrandom::SysRng, 2048)
+        .map_err(|e| format!("generating: {e}"))?;
     let [p, q] = key.primes() else {
         return Err("generating: not two primes".to_owned());
     };
-    let secret = |n: &rsa::BigUint| Zeroizing::new(n.to_bytes_be());
+    let secret = |n: &rsa::BoxedUint| Zeroizing::new(n.to_be_bytes_trimmed_vartime().into_vec());
     KeyFile::rsa(
-        &key.n().to_bytes_be(),
-        &key.e().to_bytes_be(),
+        &key.n().to_be_bytes_trimmed_vartime(),
+        &key.e().to_be_bytes_trimmed_vartime(),
         secret(key.d()),
-        secret(p),
-        secret(q),
+        secret(p.as_ref()),
+        secret(q.as_ref()),
     )
     .map_err(|e| format!("generating: {e}"))
 }
-
-/// The operating system's random numbers, for the `rand_core` generation rsa 0.9 takes.
-struct OsRng;
-
-impl rsa_rand_core::RngCore for OsRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut b = [0; 4];
-        self.fill_bytes(&mut b);
-        u32::from_le_bytes(b)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut b = [0; 8];
-        self.fill_bytes(&mut b);
-        u64::from_le_bytes(b)
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        getrandom::fill(dest).expect("the operating system's random numbers");
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rsa_rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-}
-
-impl rsa_rand_core::CryptoRng for OsRng {}
 
 fn read(path: &Path, text: &[u8]) -> Result<KeyFile, String> {
     KeyFile::read(text, None)

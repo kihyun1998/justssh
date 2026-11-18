@@ -8,7 +8,7 @@ members = [
     "crates/justssh-keys",
     "crates/justssh-broker",
 ]
-exclude = ["ci/coexist", "fuzz"]
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"
@@ -24,7 +24,7 @@ justssh-keys = { path = "crates/justssh-keys", version = "0.2.0" }
 tokio = { version = "1", default-features = false }
 proptest = "1"
 
-# Crypto: latest stable RustCrypto releases only, rsa on 0.9 (ADR-0004).
+# Crypto: latest stable RustCrypto releases only (ADR-0004).
 sha1 = "0.11"
 sha2 = "0.11"
 hmac = "0.13"
@@ -41,11 +41,7 @@ p521 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 ml-kem = "0.3"
 crypto-bigint = "0.7"
 dsa = { version = "0.7", default-features = false }
-rsa = "0.9"
-# The digest 0.10 generation rsa 0.9 works with; used only by RSA signing and verification (ADR-0004).
-rsa-sha1 = { package = "sha1", version = "0.10", features = ["oid"] }
-rsa-sha2 = { package = "sha2", version = "0.10", features = ["oid"] }
-rsa-rand-core = { package = "rand_core", version = "0.6" }
+rsa = { version = "0.10", features = ["pkcs1v15"] }
 rand_core = "0.10"
 getrandom = "0.4"
 subtle = "2"
@@ -66,7 +62,9 @@ opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
 # RSA key generation, built optimised in dev builds.
-[profile.dev.package.num-bigint-dig]
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+[profile.dev.package.crypto-primes]
 opt-level = 3
 [profile.dev.package.rsa]
 opt-level = 3
