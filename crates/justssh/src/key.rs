@@ -81,7 +81,7 @@ enum Secret {
     P256(p256::ecdsa::SigningKey),
     P384(p384::ecdsa::SigningKey),
     P521(p521::ecdsa::SigningKey),
-    Rsa(Box<rsa::PrivateKey>),
+    Rsa(Box<rsa::RsaPrivateKey>),
 }
 
 /// A private key, kept in types that zeroize on drop, with the certificate it is used under if
@@ -126,25 +126,16 @@ impl PrivateKey {
         p: Zeroizing<Vec<u8>>,
         q: Zeroizing<Vec<u8>>,
     ) -> Result<Self, KeyError> {
-        use rsa::BoxedUint;
+        use rsa::BigUint;
         use rsa::traits::PublicKeyParts;
-        let longest = [n.len(), d.len(), p.len(), q.len()]
-            .into_iter()
-            .max()
-            .unwrap_or(0);
-        let bits = u32::try_from(longest)
-            .ok()
-            .and_then(|len| len.checked_mul(8))
-            .ok_or(KeyError::InvalidKey)?
-            .max(64);
-        let key = rsa::PrivateKey::from_components(
-            BoxedUint::from_be_slice_vartime(n),
-            BoxedUint::from_be_slice_vartime(e),
-            secret_uint(&d, bits)?,
-            vec![secret_uint(&p, bits)?, secret_uint(&q, bits)?],
+        let key = rsa::RsaPrivateKey::from_components(
+            BigUint::from_bytes_be(n),
+            BigUint::from_bytes_be(e),
+            secret_uint(&d),
+            vec![secret_uint(&p), secret_uint(&q)],
         )
         .map_err(|_| KeyError::InvalidKey)?;
-        if (key.n().bit_width_vartime() as usize) < MIN_RSA_BITS {
+        if key.n().bits() < MIN_RSA_BITS {
             return Err(KeyError::InvalidKey);
         }
         Ok(PrivateKey {
@@ -213,8 +204,8 @@ impl PrivateKey {
             }
             Secret::Rsa(k) => {
                 use rsa::traits::PublicKeyParts;
-                w.mpint_unsigned(&k.e().to_be_bytes_trimmed_vartime())
-                    .mpint_unsigned(&k.n().to_be_bytes_trimmed_vartime());
+                w.mpint_unsigned(&k.e().to_bytes_be())
+                    .mpint_unsigned(&k.n().to_bytes_be());
             }
         }
         w.into_bytes()
@@ -310,17 +301,18 @@ impl PrivateKey {
                 use rsa::signature::{RandomizedSigner, SignatureEncoding};
                 const SIZED: &str = "a key of at least 1024 bits signs under every RSA algorithm";
                 let key = (**k).clone();
+                let mut rng = OldRng(rng);
                 let sig = match name {
-                    "rsa-sha2-256" => rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new(key)
-                        .try_sign_with_rng(rng, data)
+                    "rsa-sha2-256" => rsa::pkcs1v15::SigningKey::<rsa_sha2::Sha256>::new(key)
+                        .try_sign_with_rng(&mut rng, data)
                         .expect(SIZED)
                         .to_vec(),
-                    "rsa-sha2-512" => rsa::pkcs1v15::SigningKey::<sha2::Sha512>::new(key)
-                        .try_sign_with_rng(rng, data)
+                    "rsa-sha2-512" => rsa::pkcs1v15::SigningKey::<rsa_sha2::Sha512>::new(key)
+                        .try_sign_with_rng(&mut rng, data)
                         .expect(SIZED)
                         .to_vec(),
-                    _ => rsa::pkcs1v15::SigningKey::<sha1::Sha1>::new(key)
-                        .try_sign_with_rng(rng, data)
+                    _ => rsa::pkcs1v15::SigningKey::<rsa_sha1::Sha1>::new(key)
+                        .try_sign_with_rng(&mut rng, data)
                         .expect(SIZED)
                         .to_vec(),
                 };
@@ -510,13 +502,13 @@ fn verify_rsa(mut r: Reader<'_>, algorithm: &str, body: &[u8], data: &[u8]) -> b
         return false;
     };
     let (e, n) = (
-        rsa::BoxedUint::from_be_slice_vartime(e),
-        rsa::BoxedUint::from_be_slice_vartime(n),
+        rsa::BigUint::from_bytes_be(e),
+        rsa::BigUint::from_bytes_be(n),
     );
-    if e.bit_width_vartime() as usize > MAX_RSA_EXPONENT_BITS {
+    if e.bits() > MAX_RSA_EXPONENT_BITS || n.bits() < MIN_RSA_BITS {
         return false;
     }
-    let Ok(key) = rsa::PublicKey::new_with_size_limits(n, e, MIN_RSA_BITS..=MAX_RSA_BITS) else {
+    let Ok(key) = rsa::RsaPublicKey::new_with_max_size(n, e, MAX_RSA_BITS) else {
         return false;
     };
     let Some(padded) = fixed(body, rsa::traits::PublicKeyParts::size(&key)) else {
@@ -526,13 +518,13 @@ fn verify_rsa(mut r: Reader<'_>, algorithm: &str, body: &[u8], data: &[u8]) -> b
         return false;
     };
     match algorithm {
-        "rsa-sha2-256" => rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(key)
+        "rsa-sha2-256" => rsa::pkcs1v15::VerifyingKey::<rsa_sha2::Sha256>::new(key)
             .verify(data, &sig)
             .is_ok(),
-        "rsa-sha2-512" => rsa::pkcs1v15::VerifyingKey::<sha2::Sha512>::new(key)
+        "rsa-sha2-512" => rsa::pkcs1v15::VerifyingKey::<rsa_sha2::Sha512>::new(key)
             .verify(data, &sig)
             .is_ok(),
-        _ => rsa::pkcs1v15::VerifyingKey::<sha1::Sha1>::new(key)
+        _ => rsa::pkcs1v15::VerifyingKey::<rsa_sha1::Sha1>::new(key)
             .verify(data, &sig)
             .is_ok(),
     }
@@ -770,10 +762,40 @@ fn ecdsa_rs(r: &[u8], s: &[u8]) -> Vec<u8> {
     w.into_bytes()
 }
 
-/// A secret big-endian integer at `bits` of precision, set by the longest input so that none is cut.
-fn secret_uint(be: &[u8], bits: u32) -> Result<rsa::BoxedUint, KeyError> {
-    rsa::BoxedUint::from_be_slice(be, bits).map_err(|_| KeyError::InvalidKey)
+/// A secret big-endian integer, reversed in a zeroizing buffer so that no plain copy is left.
+fn secret_uint(be: &[u8]) -> rsa::BigUint {
+    let mut le = Zeroizing::new(be.to_vec());
+    le.reverse();
+    rsa::BigUint::from_bytes_le(&le)
 }
+
+/// This crate's generator as the rand_core 0.6 generator rsa 0.9 takes.
+struct OldRng<'a>(&'a mut dyn CryptoRng);
+
+impl rsa_rand_core::RngCore for OldRng<'_> {
+    fn next_u32(&mut self) -> u32 {
+        let mut b = [0; 4];
+        self.0.fill_bytes(&mut b);
+        u32::from_le_bytes(b)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut b = [0; 8];
+        self.0.fill_bytes(&mut b);
+        u64::from_le_bytes(b)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.0.fill_bytes(dest);
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rsa_rand_core::Error> {
+        self.0.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl rsa_rand_core::CryptoRng for OldRng<'_> {}
 
 #[cfg(test)]
 #[path = "../tests/common/certs.rs"]

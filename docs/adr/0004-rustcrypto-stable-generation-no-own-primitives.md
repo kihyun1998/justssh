@@ -18,10 +18,14 @@ The general case: a dependency that pins a release candidate conflicts with anyo
 
 What guarantees coexistence is the coexistence build. It targets the IronRDP the broker will ship with, which is Devolutions/IronRDP master pinned to a revision (`66bfd60`, 2026-10-20, picky rc.26), not the latest crates.io release. That revision builds with justssh, and the pin is raised by hand.
 
-## Amendment (2026-11-18): rsa 0.10, and coexistence with IronRDP stays on 0.2
+## Amendment (2026-11-18): rsa stays on 0.9 until IronRDP's dependencies move
 
-rsa 0.10.0 is released as stable, the first release outside RUSTSEC-2023-0071. justssh takes it from 0.3.0, and the digest 0.10 generation that rsa 0.9 brought is gone.
+justssh 0.3.0 was published with rsa 0.10.0. main returns to rsa 0.9, and the next release takes it from there. rsa is again the one crate kept off the latest stable generation, and the body above holds for it except its last sentence: the trigger to move is no longer rsa 0.10's stable release.
 
-IronRDP does not build with it yet. picky and sspi, which IronRDP uses, pin `rsa =0.10.0-rc.18` and `pkcs1 =0.8.0-rc.4`, and rsa 0.10.0 requires pkcs1 0.8.0, which falls in the same Cargo range as that release candidate. IronRDP master `abfc97b` (2026-11-17) still locks those versions.
+The reason is where dependents are. crates.io, queried on 2026-11-18, counts these downloads over the last 90 days: rsa 0.9.10 56.9 million, 0.10.0-rc.18 4.2 million, 0.10.0 0.27 million. Of the first 300 reverse dependencies the crates.io API lists, 184 require 0.9 and 24 require 0.10.
 
-The maintainer chose on #90 to move anyway. A binary that needs justssh and IronRDP together stays on justssh 0.2.x, which uses rsa 0.9, until picky and sspi take rsa 0.10.0 (Devolutions/picky-rs#598 proposes it for picky). The coexistence build is removed, because it can only fail until then; `ci/coexist` and its CI job are in the history for when IronRDP catches up.
+rsa 0.9 is a Cargo range of its own, so it builds next to both kinds of rsa 0.10 user. picky and sspi, which IronRDP uses, pin `rsa =0.10.0-rc.18` and `pkcs1 =0.8.0-rc.4`. russh 0.65.2 requires `rsa ^0.10` and `pkcs1 ^0.8`, which resolve to the stable releases. rsa 0.10.0 conflicts with the first, because it requires pkcs1 0.8.0, which shares a range with that release candidate. A pin to the release candidate would conflict with the second.
+
+The cost is RUSTSEC-2023-0071, which no 0.9 release fixes. The advisory is a timing leak in private-key operations; here those are RSA client authentication signatures and the broker's host key signatures. A 2048-bit signature measured about 1.2 ms on 0.9 against about 1.6 ms on 0.10 (release build, 200 signatures, 3 runs, #90).
+
+rsa moves to 0.10 once picky and sspi require rsa 0.10.0 and IronRDP takes them. The coexistence build is back, and it is what shows that moment.

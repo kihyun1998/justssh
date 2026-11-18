@@ -10,8 +10,8 @@ exclude = ["tests/", "fuzz/"]
 
 [dependencies]
 justssh-wire.workspace = true
-sha1 = { workspace = true, features = ["oid", "zeroize"] }
-sha2 = { workspace = true, features = ["oid", "zeroize"] }
+sha1 = { workspace = true, features = ["zeroize"] }
+sha2 = { workspace = true, features = ["zeroize"] }
 hmac = { workspace = true, features = ["zeroize"] }
 aes = { workspace = true, features = ["zeroize"] }
 ctr = { workspace = true, features = ["zeroize"] }
@@ -27,6 +27,9 @@ ml-kem = { workspace = true, features = ["zeroize"] }
 crypto-bigint = { workspace = true, features = ["zeroize"] }
 dsa.workspace = true
 rsa.workspace = true
+rsa-sha1.workspace = true
+rsa-sha2.workspace = true
+rsa-rand-core.workspace = true
 rand_core.workspace = true
 getrandom = { workspace = true, features = ["sys_rng"] }
 subtle.workspace = true
