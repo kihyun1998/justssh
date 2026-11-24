@@ -128,6 +128,12 @@ impl ProcessKey {
     pub fn new(pid: u32, created: Option<SystemTime>) -> Self {
         ProcessKey { pid, created }
     }
+
+    /// Whether `other` is the same process: the same pid and the same start time, both known.
+    /// A start time unknown on either side names no process.
+    pub fn same(&self, other: &ProcessKey) -> bool {
+        self.pid == other.pid && self.created.is_some() && self.created == other.created
+    }
 }
 
 impl ProcessInfo {
@@ -330,35 +336,52 @@ impl Caller {
         self.error.is_none() && root != 0 && self.ancestry.contains(&root)
     }
 
-    /// Whether the caller or one of its ancestors is one of `holders`, by pid and start time.
+    /// Whether the caller or one of its ancestors is one of `holders`, by [`ProcessKey::same`].
     pub fn descends_from_any(&self, holders: &[ProcessKey]) -> bool {
-        self.walked() && self.lineage.iter().any(|k| holders.contains(k))
+        self.walked()
+            && self
+                .lineage
+                .iter()
+                .any(|k| holders.iter().any(|h| h.same(k)))
     }
 
-    /// The process ids a token may be pinned to: inside the tree of `app`, the caller and its
-    /// ancestors below `app`; outside it, the caller alone.
-    pub fn identity(&self, app: u32) -> Vec<u32> {
+    /// The processes a token may be pinned to: inside the tree of `app`, the caller and its
+    /// ancestors below `app`; outside it, the caller alone. An unmeasured caller is named by
+    /// its pid with no start time, which matches nothing.
+    pub fn identity(&self, app: u32) -> Vec<ProcessKey> {
         if !self.walked() {
             return match self.pid {
                 0 => Vec::new(),
-                pid => vec![pid],
+                pid => vec![ProcessKey::new(pid, None)],
             };
         }
         if !self.descends_from(app) {
-            return vec![self.ancestry[0]];
+            return self.lineage.first().copied().into_iter().collect();
         }
-        self.ancestry
+        self.lineage
             .iter()
             .copied()
-            .take_while(|&p| p != app)
+            .take_while(|k| k.pid != app)
             .collect()
     }
 
-    /// Whether the caller is one of `pinned`, or descends from one.
-    pub fn matches(&self, pinned: &[u32]) -> bool {
-        if !self.walked() {
-            return self.pid != 0 && pinned.contains(&self.pid);
-        }
-        self.ancestry.iter().any(|a| pinned.contains(a))
+    /// Whether the caller is one of `pinned`, or descends from one, by [`ProcessKey::same`].
+    /// An unmeasured caller matches nothing.
+    pub fn matches(&self, pinned: &[ProcessKey]) -> bool {
+        self.walked()
+            && self
+                .lineage
+                .iter()
+                .any(|k| pinned.iter().any(|p| p.same(k)))
+    }
+
+    /// Whether the caller itself, not an ancestor, is one of `pinned`, by
+    /// [`ProcessKey::same`].
+    pub fn is_pinned(&self, pinned: &[ProcessKey]) -> bool {
+        self.walked()
+            && self
+                .lineage
+                .first()
+                .is_some_and(|k| pinned.iter().any(|p| p.same(k)))
     }
 }
