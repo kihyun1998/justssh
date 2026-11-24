@@ -72,7 +72,13 @@ async fn upstream_connection(stream: TcpStream, seen: Seen) {
     let Ok(Accepted::Authenticated { io, events, .. }) =
         justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
             let ok = r.user() == USER && r.password() == SECRET;
-            async move { ok.then_some(()) }
+            async move {
+                if ok {
+                    justssh_tokio::Verdict::Accept(())
+                } else {
+                    justssh_tokio::Verdict::Reject
+                }
+            }
         })
         .await
     else {

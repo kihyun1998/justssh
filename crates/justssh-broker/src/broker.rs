@@ -16,7 +16,7 @@ use justssh::{
     Action, ChannelId, Client, ClientConfig, Closed, DisconnectReason, Endpoint, Error,
     InfoRequest, OpenFailureReason, Phase, ReplyToken, RequestToken, Server, Zeroizing,
 };
-use justssh_tokio::{Accepted, AuthMethod, ClientHandler, Connected, Deadlines, Session};
+use justssh_tokio::{Accepted, AuthMethod, ClientHandler, Connected, Deadlines, Session, Verdict};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, sleep_until, timeout};
@@ -133,7 +133,7 @@ async fn connection(
                         ),
                         &[],
                     );
-                    return None;
+                    return Verdict::Reject;
                 }
             };
             let admitted = match grant.admission {
@@ -151,12 +151,12 @@ async fn connection(
                         ),
                         &[],
                     );
-                    Some(up)
+                    Verdict::Accept(up)
                 }
                 Err(e) => {
                     logs.log
                         .error(format!("upstream authentication failed: {e}"), &[]);
-                    None
+                    Verdict::Reject
                 }
             }
         }

@@ -11,8 +11,8 @@ use std::task::Poll;
 use std::time::Duration;
 
 use justssh::{
-    Action, ChannelId, Closed, Endpoint, Event, GlobalReplyToken, OpenFailureReason,
-    PasswordRequest, Phase, ReplyToken, RequestToken, Server,
+    Action, ChannelId, Closed, DisconnectReason, Endpoint, Event, GlobalReplyToken,
+    OpenFailureReason, PasswordRequest, Phase, ReplyToken, RequestToken, Server,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::time::{Instant, timeout_at};
@@ -62,7 +62,7 @@ fn rank(phase: Phase) -> u8 {
 #[derive(Debug)]
 pub enum Accepted<IO, T> {
     /// The client authenticated. `io` and the [`Server`] are positioned at the start of the
-    /// connection protocol; `value` is what `authenticate` returned.
+    /// connection protocol; `value` is what `authenticate`'s [`Verdict::Accept`] carried.
     Authenticated {
         io: IO,
         value: T,
@@ -74,9 +74,27 @@ pub enum Accepted<IO, T> {
     Closed(Closed),
 }
 
+/// The answer [`accept`]'s `authenticate` gives to one password attempt.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict<T> {
+    /// The client is authenticated; [`accept`] returns the value with the connection.
+    Accept(T),
+    /// The attempt failed: the client may try again until the server's `max_auth_tries` is
+    /// reached, which ends the connection with `too many authentication failures`.
+    Reject,
+    /// The connection ends at once with `SSH_MSG_DISCONNECT` carrying `reason` and
+    /// `description` as given, without counting a failure; [`accept`] returns
+    /// [`Closed::Requested`] with `reason`.
+    Refuse {
+        reason: DisconnectReason,
+        description: String,
+    },
+}
+
 /// Runs `server` over `io` through the handshake and user authentication, and returns as soon
-/// as the client is authenticated. Each password attempt is passed to `authenticate`, which
-/// accepts it by returning `Some` and may take as long as it needs; the connection waits, and
+/// as the client is authenticated. Each password attempt is passed to `authenticate`, whose
+/// [`Verdict`] answers it and which may take as long as it needs; the connection waits, and
 /// other connections are not held up.
 ///
 /// An I/O error, or the peer closing the stream without `SSH_MSG_DISCONNECT`, is returned as
@@ -90,7 +108,7 @@ pub async fn accept<IO, F, Fut, T>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
     F: FnMut(PasswordRequest) -> Fut,
-    Fut: Future<Output = Option<T>>,
+    Fut: Future<Output = Verdict<T>>,
 {
     let start = Instant::now();
     let mut buf = vec![0u8; 32 * 1024];
@@ -143,11 +161,18 @@ where
             };
             actions = match verdict {
                 None => server.process(Event::DeadlineExceeded),
-                Some(Some(value)) => {
+                Some(Verdict::Accept(value)) => {
                     accepted = Some(value);
                     server.process(Event::AuthAccepted)
                 }
-                Some(None) => server.process(Event::AuthRejected),
+                Some(Verdict::Reject) => server.process(Event::AuthRejected),
+                Some(Verdict::Refuse {
+                    reason,
+                    description,
+                }) => server.process(Event::AuthRefused {
+                    reason,
+                    description: &description,
+                }),
             };
             continue;
         }

@@ -38,9 +38,11 @@ fn host_key() -> HostKey {
 async fn server_session(io: DuplexStream) -> Session<DuplexStream, Server> {
     let mut server = Server::new(ServerConfig::builder(host_key()).build());
     let Accepted::Authenticated { io, events, .. } =
-        justssh_tokio::accept(io, &mut server, &Deadlines::new(), |_| async { Some(()) })
-            .await
-            .unwrap()
+        justssh_tokio::accept(io, &mut server, &Deadlines::new(), |_| async {
+            justssh_tokio::Verdict::Accept(())
+        })
+        .await
+        .unwrap()
     else {
         panic!("not authenticated");
     };

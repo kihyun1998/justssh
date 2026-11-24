@@ -58,7 +58,7 @@ async fn session_with_channel(
             ServerConfig::builder(HostKey::ed25519_from_seed(Zeroizing::new([7; 32]))).build();
         let mut server = Server::new(config);
         match justssh_tokio::accept(server_io, &mut server, &Deadlines::new(), |_| async {
-            Some(())
+            justssh_tokio::Verdict::Accept(())
         })
         .await
         .unwrap()
@@ -172,7 +172,7 @@ async fn an_open_sent_right_behind_the_auth_request_is_not_lost() {
             ServerConfig::builder(HostKey::ed25519_from_seed(Zeroizing::new([7; 32]))).build();
         let mut server = Server::new(config);
         match justssh_tokio::accept(server_io, &mut server, &Deadlines::new(), |_| async {
-            Some(())
+            justssh_tokio::Verdict::Accept(())
         })
         .await
         .unwrap()
