@@ -77,7 +77,13 @@ async fn run_with_tries(
         let _ = justssh_tokio::accept(server_io, &mut server, &Deadlines::new(), |request| {
             shown.push(request.password().to_vec());
             let ok = request.user() == b"alice" && request.password() == b"pw";
-            async move { ok.then_some(()) }
+            async move {
+                if ok {
+                    justssh_tokio::Verdict::Accept(())
+                } else {
+                    justssh_tokio::Verdict::Reject
+                }
+            }
         })
         .await;
         shown
@@ -450,7 +456,7 @@ async fn a_client_session_and_a_server_session_carry_an_exec_both_ways() {
         let mut server = Server::new(config);
         let Ok(justssh_tokio::Accepted::Authenticated { io, events, .. }) =
             justssh_tokio::accept(server_io, &mut server, &Deadlines::new(), |_| async {
-                Some(())
+                justssh_tokio::Verdict::Accept(())
             })
             .await
         else {

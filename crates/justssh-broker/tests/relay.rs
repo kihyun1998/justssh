@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use justssh::requests::{Exec, ExitStatus, Subsystem};
 use justssh::{
-    Action, ChannelId, Client, ClientConfig, HostKey, InfoRequest, OpenFailureReason, Server,
-    ServerConfig, Zeroizing,
+    Action, ChannelId, Client, ClientConfig, Closed, DisconnectReason, HostKey, InfoRequest,
+    OpenFailureReason, Server, ServerConfig, Zeroizing,
 };
 use justssh_broker::caller::Caller;
 use justssh_broker::log::Log;
@@ -72,7 +72,13 @@ async fn upstream_connection(stream: TcpStream, seen: Seen) {
     let Ok(Accepted::Authenticated { io, events, .. }) =
         justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
             let ok = r.user() == USER && r.password() == SECRET;
-            async move { ok.then_some(()) }
+            async move {
+                if ok {
+                    justssh_tokio::Verdict::Accept(())
+                } else {
+                    justssh_tokio::Verdict::Reject
+                }
+            }
         })
         .await
     else {
@@ -490,11 +496,36 @@ async fn a_global_request_goes_upstream_and_its_answer_comes_back() {
 }
 
 #[tokio::test]
-async fn an_upstream_that_refuses_the_credential_fails_the_downstream_authentication() {
+async fn an_upstream_that_refuses_the_credential_ends_the_downstream_saying_so() {
     let tokens = tokens();
     let token = issue_with(&tokens, &upstream().await, b"not-the-secret");
     let addr = broker(tokens).await;
-    assert!(downstream(&addr, token.as_bytes()).await.is_none());
+    let stream = TcpStream::connect(&addr).await.unwrap();
+    let mut client = Client::new(ClientConfig::builder(USER).build());
+    let connected = justssh_tokio::connect(
+        stream,
+        &mut client,
+        &Deadlines::new(),
+        &[AuthMethod::Password(Zeroizing::new(
+            token.as_bytes().to_vec(),
+        ))],
+        &mut AcceptAll,
+    )
+    .await
+    .unwrap();
+    let Connected::Closed(Closed::Peer {
+        reason,
+        description,
+        ..
+    }) = connected
+    else {
+        panic!("the downstream was not disconnected by the broker");
+    };
+    assert_eq!(reason, DisconnectReason::BY_APPLICATION);
+    assert_eq!(
+        description,
+        "the target server refused the stored credential or could not be reached"
+    );
 }
 
 #[tokio::test]

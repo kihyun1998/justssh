@@ -39,7 +39,7 @@ async fn pair() -> (
         );
         let Accepted::Authenticated { io, events, .. } =
             justssh_tokio::accept(server_io, &mut server, &Deadlines::new(), |_| async {
-                Some(())
+                justssh_tokio::Verdict::Accept(())
             })
             .await
             .unwrap()

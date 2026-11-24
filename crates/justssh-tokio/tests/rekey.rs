@@ -31,9 +31,11 @@ async fn counting_server(io: DuplexStream, rekey_after: Option<usize>) -> usize 
     let config = ServerConfig::builder(HostKey::ed25519_from_seed(Zeroizing::new([7; 32]))).build();
     let mut server = Server::new(config);
     let Accepted::Authenticated { io, events, .. } =
-        justssh_tokio::accept(io, &mut server, &Deadlines::new(), |_| async { Some(()) })
-            .await
-            .unwrap()
+        justssh_tokio::accept(io, &mut server, &Deadlines::new(), |_| async {
+            justssh_tokio::Verdict::Accept(())
+        })
+        .await
+        .unwrap()
     else {
         panic!("not authenticated");
     };

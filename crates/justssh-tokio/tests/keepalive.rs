@@ -25,7 +25,7 @@ async fn serve(listener: TcpListener) -> std::io::Result<Vec<(String, bool, Vec<
     let mut server = Server::new(config);
     let Accepted::Authenticated { io, events, .. } =
         justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |_| async {
-            Some(())
+            justssh_tokio::Verdict::Accept(())
         })
         .await?
     else {
@@ -128,7 +128,7 @@ async fn serve_unread(listener: TcpListener) -> std::io::Result<usize> {
     let mut server = Server::new(config);
     let Accepted::Authenticated { io, events, .. } =
         justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |_| async {
-            Some(())
+            justssh_tokio::Verdict::Accept(())
         })
         .await?
     else {

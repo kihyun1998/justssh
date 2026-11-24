@@ -12,7 +12,7 @@ use justssh::{
     Closed, DisconnectReason, EcdsaCurve, Error, HostKey, Phase, PrivateKey, Server, ServerConfig,
     ServerConfigBuilder, Zeroizing,
 };
-use justssh_tokio::{Accepted, Deadlines, Session};
+use justssh_tokio::{Accepted, Deadlines, Session, Verdict};
 use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::Notify;
@@ -110,8 +110,11 @@ async fn accept_one_with(
                 if let Some(gate) = gate {
                     gate.notified().await;
                 }
-                (req.password() == PASSWORD.as_bytes())
-                    .then(|| String::from_utf8_lossy(req.user()).into_owned())
+                if req.password() == PASSWORD.as_bytes() {
+                    Verdict::Accept(String::from_utf8_lossy(req.user()).into_owned())
+                } else {
+                    Verdict::Reject
+                }
             }
         })
         .await;
@@ -217,6 +220,43 @@ async fn a_wrong_password_with_a_limit_of_one_ends_in_too_many_authentication_fa
 }
 
 #[tokio::test]
+async fn openssh_prints_the_description_of_a_refused_password_at_a_limit_of_one() {
+    const REFUSAL: &str = "the target server refused the stored credential";
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut server = Server::new(config(|b| b.max_auth_tries(NonZeroU32::MIN)));
+        justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |_| async {
+            Verdict::<()>::Refuse {
+                reason: DisconnectReason::BY_APPLICATION,
+                description: REFUSAL.to_owned(),
+            }
+        })
+        .await
+    });
+    let log = ssh(port, PASSWORD).await;
+    assert!(
+        log.contains(&format!(":11: {REFUSAL}")),
+        "no refusal disconnect:\n{log}"
+    );
+    assert!(
+        !log.contains("too many authentication failures"),
+        "the limit message reached the client:\n{log}"
+    );
+    match timeout(LIMIT, task).await.unwrap().unwrap().unwrap() {
+        Accepted::Closed(closed) => assert_eq!(
+            closed,
+            Closed::Requested {
+                reason: DisconnectReason::BY_APPLICATION,
+                phase: Phase::Auth,
+            }
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_pending_verdict_does_not_hold_up_another_connection() {
     let gate = Arc::new(Notify::new());
     let (held_port, held) = accept_one(1, Some(gate.clone())).await;
@@ -252,7 +292,7 @@ async fn an_auth_deadline_closes_with_the_phase() {
         let mut server = Server::new(config(|b| b));
         let deadlines = Deadlines::new().phase(Phase::Auth, Duration::from_secs(3));
         justssh_tokio::accept(stream, &mut server, &deadlines, |_| async {
-            std::future::pending::<Option<()>>().await
+            std::future::pending::<Verdict<()>>().await
         })
         .await
     });
@@ -450,7 +490,13 @@ async fn serve_output(config: ServerConfig) -> (u16, JoinHandle<()>) {
         let mut server = Server::new(config);
         let accepted = justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
             let ok = r.password() == PASSWORD.as_bytes();
-            async move { ok.then_some(()) }
+            async move {
+                if ok {
+                    Verdict::Accept(())
+                } else {
+                    Verdict::Reject
+                }
+            }
         })
         .await
         .unwrap();
@@ -581,7 +627,13 @@ async fn record_requests(status: u32) -> (u16, JoinHandle<Vec<(String, Vec<u8>)>
         let mut server = Server::new(config(|b| b));
         let accepted = justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
             let ok = r.password() == PASSWORD.as_bytes();
-            async move { ok.then_some(()) }
+            async move {
+                if ok {
+                    Verdict::Accept(())
+                } else {
+                    Verdict::Reject
+                }
+            }
         })
         .await
         .unwrap();

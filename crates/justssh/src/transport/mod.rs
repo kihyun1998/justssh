@@ -338,6 +338,13 @@ impl Transport {
                 self.auth_failed("password");
                 self.drain();
             }
+            Event::AuthRefused {
+                reason,
+                description,
+            } if self.auth_pending() => {
+                self.end_pending();
+                self.close_as_requested(reason, description);
+            }
             Event::HostKeyAccepted if self.host_key_pending.is_some() => {
                 let pending = self.host_key_pending.take().expect("checked");
                 self.finish_exchange(&pending.k, &pending.h);
@@ -499,15 +506,19 @@ impl Transport {
         description: &str,
     ) -> Vec<Action> {
         if self.phase != Phase::Closed && self.started {
-            self.send(&Message::Disconnect(Disconnect::new(
-                reason.code(),
-                description,
-                "",
-            )));
-            let phase = self.phase;
-            self.close(Closed::Requested { reason, phase });
+            self.close_as_requested(reason, description);
         }
         std::mem::take(&mut self.actions)
+    }
+
+    fn close_as_requested(&mut self, reason: DisconnectReason, description: &str) {
+        self.send(&Message::Disconnect(Disconnect::new(
+            reason.code(),
+            description,
+            "",
+        )));
+        let phase = self.phase;
+        self.close(Closed::Requested { reason, phase });
     }
 
     fn write(&mut self, bytes: Vec<u8>) {

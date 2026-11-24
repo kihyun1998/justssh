@@ -8,7 +8,13 @@ How the server side of RFC 4252 is counted and paced, and how the client side as
 
 ## Nothing moves while a verdict is pending
 
-A client may send several requests without waiting (RFC 4252 §5). While an `Action::PasswordRequest` awaits `Event::AuthAccepted` or `AuthRejected`, received bytes are buffered but not processed, so later requests are answered in order after the verdict. The buffer holds at most one largest packet with its length field and the longest MAC, hmac-sha2-512's 64 bytes; more ends the connection.
+A client may send several requests without waiting (RFC 4252 §5). While an `Action::PasswordRequest` awaits `Event::AuthAccepted`, `AuthRejected` or `AuthRefused`, received bytes are buffered but not processed, so later requests are answered in order after the verdict. The buffer holds at most one largest packet with its length field and the longest MAC, hmac-sha2-512's 64 bytes; more ends the connection.
+
+## A refusal ends the connection outside the count
+
+`Event::AuthRefused` answers the pending request by sending `SSH_MSG_DISCONNECT` with the consumer's reason and description, as given, and the empty language tag every other disconnect sends; no `SSH_MSG_USERAUTH_FAILURE` goes out, `ServerAuth::failed` is not called, and the connection closes as `Closed::Requested` with that reason, the way `Server::disconnect` closes. It exists for a gatekeeper whose verdict depends on an upstream login (#97): when the upstream refused the stored credential, a rejection at `max_auth_tries(1)` showed the person "too many authentication failures" (reason 2), measured through acwbroker against a real target and shown by PuTTY as is, although they had typed nothing wrong. The description is the consumer's text alone; nothing from the request is put into it.
+
+This verdict is outside x/crypto/ssh: in v0.55 a `PasswordCallback` either returns no error, which authenticates, or an error, which counts as a failure, `BannerError` included, whose message goes out as a banner before the failure is counted (`server.go` 960–1009). No answer there ends the connection with a reason and description of the callback's choosing.
 
 ## EXT_INFO is the packet after the server's first NEWKEYS
 
@@ -28,11 +34,11 @@ A `password` request whose first byte is `TRUE` asks to change the password (RFC
 
 ## The adapter stops at authentication
 
-`justssh_tokio::accept` returns as soon as the client is authenticated, handing back the stream and what the verdict callback returned, the way x/crypto/ssh's `NewServerConn` returns after authentication. The connection protocol runs from there in a separate step, `Session`, which starts from the `events` `accept` returns: whatever the peer sent right behind its authentication request, such as a channel open, is handled with the last authentication step and must not be dropped. The callback runs under the deadline and is dropped if it passes, so whatever it opens must be released on drop.
+`justssh_tokio::accept` returns as soon as the client is authenticated, handing back the stream and the value the callback's `Verdict::Accept` carried, the way x/crypto/ssh's `NewServerConn` returns after authentication. The connection protocol runs from there in a separate step, `Session`, which starts from the `events` `accept` returns: whatever the peer sent right behind its authentication request, such as a channel open, is handled with the last authentication step and must not be dropped. The callback answers each attempt with a `Verdict`: `Accept`, `Reject`, or `Refuse` with a reason and description, after which `accept` returns `Accepted::Closed(Closed::Requested { .. })` with that reason. The callback runs under the deadline and is dropped if it passes, so whatever it opens must be released on drop; a refusal that would have come after the deadline never reaches the client, which reads "deadline exceeded".
 
 ## A verdict answers whatever request is pending
 
-`Event::AuthAccepted` and `AuthRejected` carry no reference to the request they answer; they apply to the one pending. A consumer of the bare core that answers late or twice could accept a request it never checked. `justssh_tokio::accept` answers one request at a time, and with a limit of one failure the first rejection ends the connection, so neither path reaches it. The maintainer chose to leave it on #4.
+`Event::AuthAccepted`, `AuthRejected` and `AuthRefused` carry no reference to the request they answer; they apply to the one pending. With none pending, each ends the connection as an unexpected event (reason 2), as any event the state does not take does. A consumer of the bare core that answers late or twice could accept a request it never checked. `justssh_tokio::accept` answers one request at a time, and with a limit of one failure the first rejection ends the connection, so neither path reaches it. The maintainer chose to leave it on #4.
 
 ## The client core makes one attempt at a time; the adapter picks the method
 

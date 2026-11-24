@@ -103,7 +103,13 @@ async fn go_client_with(go: &PathBuf, args: Vec<String>, config: ServerConfig) -
         LIMIT,
         justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
             let ok = r.user() == b"alice" && r.password() == b"pw";
-            async move { ok.then_some(()) }
+            async move {
+                if ok {
+                    justssh_tokio::Verdict::Accept(())
+                } else {
+                    justssh_tokio::Verdict::Reject
+                }
+            }
         }),
     )
     .await
@@ -525,7 +531,13 @@ async fn go_client_session(go: &PathBuf, args: Vec<String>, config: ServerConfig
         LIMIT,
         justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
             let ok = r.user() == b"alice" && r.password() == b"pw";
-            async move { ok.then_some(()) }
+            async move {
+                if ok {
+                    justssh_tokio::Verdict::Accept(())
+                } else {
+                    justssh_tokio::Verdict::Reject
+                }
+            }
         }),
     )
     .await
@@ -733,7 +745,13 @@ async fn a_go_client_naming_requests_and_a_channel_type_in_bytes_that_are_not_ut
         LIMIT,
         justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
             let ok = r.user() == b"alice" && r.password() == b"pw";
-            async move { ok.then_some(()) }
+            async move {
+                if ok {
+                    justssh_tokio::Verdict::Accept(())
+                } else {
+                    justssh_tokio::Verdict::Reject
+                }
+            }
         }),
     )
     .await
@@ -880,7 +898,13 @@ async fn a_go_client_is_refused_with_the_message_the_server_gave_byte_for_byte()
         LIMIT,
         justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
             let ok = r.user() == b"alice" && r.password() == b"pw";
-            async move { ok.then_some(()) }
+            async move {
+                if ok {
+                    justssh_tokio::Verdict::Accept(())
+                } else {
+                    justssh_tokio::Verdict::Reject
+                }
+            }
         }),
     )
     .await
@@ -961,7 +985,13 @@ async fn go_client_printing(go: &PathBuf, args: &[&str], config: ServerConfig) -
         LIMIT,
         justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |r| {
             let ok = r.user() == b"alice" && r.password() == b"pw";
-            async move { ok.then_some(()) }
+            async move {
+                if ok {
+                    justssh_tokio::Verdict::Accept(())
+                } else {
+                    justssh_tokio::Verdict::Reject
+                }
+            }
         }),
     )
     .await

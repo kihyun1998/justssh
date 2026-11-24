@@ -23,6 +23,13 @@ pub enum Event<'a> {
     AuthAccepted,
     /// The consumer rejects the pending [`Action::PasswordRequest`].
     AuthRejected,
+    /// The consumer refuses the pending [`Action::PasswordRequest`]: the connection ends at
+    /// once with `SSH_MSG_DISCONNECT` carrying `reason` and `description` as given, and the
+    /// attempt is not counted as a failure.
+    AuthRefused {
+        reason: DisconnectReason,
+        description: &'a str,
+    },
     /// The consumer accepts the host key of the pending [`Action::VerifyHostKey`].
     HostKeyAccepted,
     /// The consumer rejects the host key of the pending [`Action::VerifyHostKey`]; the
@@ -39,7 +46,8 @@ pub enum Action {
     /// Bytes to send to the peer.
     Write(Vec<u8>),
     /// A client asks to authenticate with a password. Nothing further is processed until the
-    /// consumer answers with [`Event::AuthAccepted`] or [`Event::AuthRejected`].
+    /// consumer answers with [`Event::AuthAccepted`], [`Event::AuthRejected`] or
+    /// [`Event::AuthRefused`].
     PasswordRequest(PasswordRequest),
     /// The server's host key blob, its signature over the exchange hash verified: the
     /// certificate when a certificate algorithm was negotiated, of which only the key has been

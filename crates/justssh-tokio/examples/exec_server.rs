@@ -21,7 +21,7 @@ pub async fn serve_connection(stream: TcpStream) -> std::io::Result<()> {
     let mut server = Server::new(config);
     let (io, events) =
         match justssh_tokio::accept(stream, &mut server, &Deadlines::new(), |_| async {
-            Some(())
+            justssh_tokio::Verdict::Accept(())
         })
         .await?
         {

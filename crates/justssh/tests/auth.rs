@@ -262,15 +262,70 @@ fn a_password_change_request_is_a_protocol_error() {
 
 #[test]
 fn a_verdict_with_nothing_pending_is_an_unexpected_event() {
-    let (mut server, mut client) = at_auth(6);
-    let x = answer(&mut server, &mut client, Event::AuthAccepted);
-    assert!(matches!(
-        closed(&x.server),
-        Some(Closed::Local {
-            error: Error::UnexpectedEvent,
-            ..
-        })
-    ));
+    for verdict in [
+        Event::AuthAccepted,
+        Event::AuthRejected,
+        Event::AuthRefused {
+            reason: DisconnectReason::BY_APPLICATION,
+            description: "refused",
+        },
+    ] {
+        let (mut server, mut client) = at_auth(6);
+        let x = answer(&mut server, &mut client, verdict);
+        match &x.replies[..] {
+            [Message::Disconnect(d)] => {
+                assert_eq!(d.reason, 2, "{verdict:?}");
+                assert_eq!(d.description, "unexpected event", "{verdict:?}");
+            }
+            other => panic!("{verdict:?}: expected only a disconnect, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                closed(&x.server),
+                Some(Closed::Local {
+                    error: Error::UnexpectedEvent,
+                    ..
+                })
+            ),
+            "{verdict:?}"
+        );
+    }
+}
+
+const REFUSAL: &str = "대상 서버가 저장된 자격 증명을 거절했습니다";
+
+#[test]
+fn a_refused_password_sends_only_the_consumers_disconnect_and_closes_as_requested() {
+    for max_auth_tries in [1, 6] {
+        let (mut server, mut client) = at_auth(max_auth_tries);
+        deliver(&mut server, &mut client, &[password(b"pw")]);
+        let reason = DisconnectReason::from_code(14);
+        let x = answer(
+            &mut server,
+            &mut client,
+            Event::AuthRefused {
+                reason,
+                description: REFUSAL,
+            },
+        );
+        match &x.replies[..] {
+            [Message::Disconnect(d)] => {
+                assert_eq!(d.reason, 14, "limit {max_auth_tries}");
+                assert_eq!(d.description, REFUSAL, "limit {max_auth_tries}");
+                assert_eq!(d.language, "", "limit {max_auth_tries}");
+            }
+            other => panic!("limit {max_auth_tries}: expected only a disconnect, got {other:?}"),
+        }
+        assert_eq!(
+            closed(&x.server),
+            Some(&Closed::Requested {
+                reason,
+                phase: Phase::Auth,
+            }),
+            "limit {max_auth_tries}"
+        );
+        assert_eq!(server.phase(), Phase::Closed);
+    }
 }
 
 #[test]
