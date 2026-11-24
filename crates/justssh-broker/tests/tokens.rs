@@ -55,25 +55,28 @@ fn issue_for(user: &[u8], upstream: &str, password: &[u8], extra: &[(u8, &[u8])]
     issue::decode(&payload).unwrap()
 }
 
+fn started(pid: u32) -> ProcessKey {
+    ProcessKey::new(pid, origin_minus(60))
+}
+
+fn walked(ancestry: Vec<u32>) -> Caller {
+    let keys: Vec<ProcessKey> = ancestry.into_iter().map(started).collect();
+    lineage(&keys)
+}
+
 /// A caller whose ancestry reaches the app, with the shells above it a real chain carries.
 fn in_tree(chain: &[u32]) -> Caller {
-    let mut c = Caller::new(chain[0]);
-    c.ancestry = [chain, &[APP, 5504, 34924]].concat();
-    c
+    walked([chain, &[APP, 5504, 34924]].concat())
 }
 
 /// An instance the user started from the desktop.
 fn out_of_tree(pid: u32) -> Caller {
-    let mut c = Caller::new(pid);
-    c.ancestry = vec![pid, EXPLORER];
-    c
+    walked(vec![pid, EXPLORER])
 }
 
 /// MobaXterm's `_ssh.exe`, whose recorded parent is already gone.
 fn orphan(pid: u32) -> Caller {
-    let mut c = Caller::new(pid);
-    c.ancestry = vec![pid];
-    c
+    walked(vec![pid])
 }
 
 fn unowned() -> Caller {
@@ -395,6 +398,17 @@ async fn the_same_process_again_is_admitted_by_pin() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_failed_measurement_matches_no_pin_even_with_a_lineage() {
+    let mut b = Bench::new();
+    let t = b.issue();
+    b.admit(&t, &in_tree(&[WINSCP]));
+    b.at(Duration::from_secs(30)).await;
+    let mut failed = in_tree(&[WINSCP]);
+    failed.error = Some("no such process".to_owned());
+    assert_eq!(b.refuse(&t, &failed), Refusal::CallerNotPinned);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_helper_under_the_pinned_program_is_admitted_as_descendant() {
     let mut b = Bench::new();
     let t = b.issue();
@@ -418,13 +432,18 @@ async fn an_unrelated_process_inside_the_grace_is_admitted_by_grace_and_pinned_a
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_unmeasured_caller_is_still_named_by_branch() {
-    let mut b = Bench::new();
+async fn an_unmeasured_caller_claims_but_matches_no_pin_after_the_grace() {
+    let hold = Arc::new(FakeHold::default());
+    let mut b = Bench::with(|c| c.peer.hold = Some(hold.clone()));
     let t = b.issue();
     let unmeasured = Caller::new(PUTTY);
     assert_eq!(b.admit(&t, &unmeasured), Admission::Claim);
+    assert_eq!(hold.held(), [PUTTY]);
+    b.at(Duration::from_secs(1)).await;
+    assert_eq!(b.admit(&t, &unmeasured), Admission::Grace);
     b.at(Duration::from_secs(30)).await;
-    assert_eq!(b.admit(&t, &unmeasured), Admission::Pin);
+    assert_eq!(b.refuse(&t, &unmeasured), Refusal::CallerNotPinned);
+    assert_eq!(b.refuse(&t, &out_of_tree(PUTTY)), Refusal::CallerNotPinned);
 }
 
 // admit_test.go
@@ -840,7 +859,6 @@ fn login_key() -> ProcessKey {
 fn lineage(keys: &[ProcessKey]) -> Caller {
     let mut c = Caller::new(keys[0].pid);
     c.lineage = keys.to_vec();
-    c.ancestry = keys.iter().map(|k| k.pid).collect();
     c
 }
 
@@ -905,6 +923,17 @@ async fn a_bound_token_refuses_a_recycled_pid_of_the_tabs_shell() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_bound_token_refuses_a_holder_whose_start_time_is_unknown() {
+    let b = Bench::new();
+    let unknown = ProcessKey::new(3339, None);
+    let t = b
+        .tokens
+        .issue_bound(issue_for(USER, "127.0.0.1:2222", b"p", &[]), vec![unknown]);
+    let c = lineage(&[key(3739), unknown, key(1)]);
+    assert_eq!(b.refuse(&t, &c), Refusal::WrongTerminal);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_binding_with_no_holders_admits_nobody() {
     let b = Bench::new();
     let t = b
@@ -921,7 +950,7 @@ async fn a_bound_token_refuses_an_unmeasured_caller() {
     failed.error = Some("no socket owns that endpoint".to_owned());
     assert_eq!(b.refuse(&t, &failed), Refusal::WrongTerminal);
     let mut no_chain = in_tab();
-    no_chain.ancestry.clear();
+    no_chain.lineage.clear();
     assert_eq!(b.refuse(&t, &no_chain), Refusal::WrongTerminal);
 }
 
@@ -1081,6 +1110,95 @@ async fn a_pinned_process_that_exited_no_longer_matches_its_number() {
     b.at(DEFAULT_GRACE + Duration::from_secs(5)).await;
     assert_eq!(b.refuse(&t, &out_of_tree(PUTTY)), Refusal::CallerNotPinned);
     b.admit(&t, &out_of_tree(SECURECRT));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_process_that_reuses_the_pid_of_one_that_could_not_be_held_is_refused() {
+    let hold = Arc::new(FakeHold {
+        fail: vec![PUTTY],
+        ..FakeHold::default()
+    });
+    let mut b = Bench::with(|c| c.peer.hold = Some(hold.clone()));
+    let t = b.issue();
+    b.admit(&t, &out_of_tree(PUTTY));
+    b.at(DEFAULT_GRACE + Duration::from_secs(5)).await;
+    let reused = lineage(&[ProcessKey::new(PUTTY, origin_minus(0)), key(EXPLORER)]);
+    assert_eq!(b.refuse(&t, &reused), Refusal::CallerNotPinned);
+    assert_eq!(b.admit(&t, &out_of_tree(PUTTY)), Admission::Pin);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_process_that_reuses_a_pid_before_its_exit_is_seen_is_refused() {
+    let hold = Arc::new(FakeHold::default());
+    let mut b = Bench::with(|c| c.peer.hold = Some(hold.clone()));
+    let t = b.issue();
+    b.admit(&t, &out_of_tree(PUTTY));
+    b.at(DEFAULT_GRACE + Duration::from_secs(5)).await;
+    assert_eq!(hold.held(), [PUTTY]);
+    let reused = lineage(&[ProcessKey::new(PUTTY, origin_minus(0)), key(EXPLORER)]);
+    assert_eq!(b.refuse(&t, &reused), Refusal::CallerNotPinned);
+    assert_eq!(b.tokens.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_process_whose_start_time_is_unknown_matches_no_pin() {
+    let unknown = lineage(&[ProcessKey::new(PUTTY, None), key(EXPLORER)]);
+    let mut b = Bench::new();
+    let t = b.issue();
+    assert_eq!(b.admit(&t, &unknown), Admission::Claim);
+    b.at(DEFAULT_GRACE + Duration::from_secs(1)).await;
+    assert_eq!(b.refuse(&t, &unknown), Refusal::CallerNotPinned);
+
+    let mut b = Bench::new();
+    let t = b.issue();
+    b.admit(&t, &out_of_tree(PUTTY));
+    b.at(DEFAULT_GRACE + Duration::from_secs(1)).await;
+    assert_eq!(b.refuse(&t, &unknown), Refusal::CallerNotPinned);
+    assert_eq!(b.admit(&t, &out_of_tree(PUTTY)), Admission::Pin);
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_a_real_descendant_of_a_pinned_process_is_admitted() {
+    let mut b = Bench::new();
+    let t = b.issue();
+    b.admit(&t, &in_tree(&[FZSFTP, FILEZILLA]));
+    b.at(DEFAULT_GRACE + Duration::from_secs(1)).await;
+    let reused_parent = ProcessKey::new(FILEZILLA, origin_minus(0));
+    let fake = lineage(&[key(41000), reused_parent, key(EXPLORER)]);
+    assert_eq!(b.refuse(&t, &fake), Refusal::CallerNotPinned);
+    assert_eq!(
+        b.admit(&t, &in_tree(&[41000, FILEZILLA])),
+        Admission::Descendant
+    );
+    assert_eq!(b.admit(&t, &in_tree(&[FZSFTP, FILEZILLA])), Admission::Pin);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_process_whose_start_time_is_unknown_is_watched_on_each_claim() {
+    let hold = Arc::new(FakeHold::default());
+    let mut b = Bench::with(|c| c.peer.hold = Some(hold.clone()));
+    let t = b.issue();
+    b.admit(&t, &Caller::new(PUTTY));
+    b.at(Duration::from_secs(1)).await;
+    assert_eq!(b.admit(&t, &Caller::new(PUTTY)), Admission::Grace);
+    assert_eq!(hold.held(), [PUTTY, PUTTY]);
+    hold.exit(PUTTY);
+    settle().await;
+    assert_eq!(b.tokens.len(), 1);
+    hold.exit(PUTTY);
+    settle().await;
+    assert!(b.tokens.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_process_that_reuses_a_pinned_pid_under_a_pinned_parent_enters_as_descendant() {
+    let mut b = Bench::new();
+    let t = b.issue();
+    b.admit(&t, &in_tree(&[FZSFTP, FILEZILLA]));
+    b.at(DEFAULT_GRACE + Duration::from_secs(1)).await;
+    let mut reused = in_tree(&[FZSFTP, FILEZILLA]);
+    reused.lineage[0] = ProcessKey::new(FZSFTP, origin_minus(0));
+    assert_eq!(b.admit(&t, &reused), Admission::Descendant);
 }
 
 // authorize_test.go, registry_test.go, upstream_test.go
@@ -1395,12 +1513,27 @@ fn an_unreadable_executable_is_refused_as_unreadable() {
 fn identity_pins_the_tree_below_the_app_or_the_caller_alone() {
     assert_eq!(
         in_tree(&[FZSFTP, FILEZILLA]).identity(APP),
-        [FZSFTP, FILEZILLA]
+        [started(FZSFTP), started(FILEZILLA)]
     );
-    assert_eq!(out_of_tree(SECURECRT).identity(APP), [SECURECRT]);
-    assert_eq!(Caller::new(PUTTY).identity(APP), [PUTTY]);
+    assert_eq!(out_of_tree(SECURECRT).identity(APP), [started(SECURECRT)]);
+    assert_eq!(
+        Caller::new(PUTTY).identity(APP),
+        [ProcessKey::new(PUTTY, None)]
+    );
     assert!(unowned().identity(APP).is_empty());
-    assert_eq!(in_tree(&[PUTTY]).identity(0), [PUTTY]);
+    assert_eq!(in_tree(&[PUTTY]).identity(0), [started(PUTTY)]);
+}
+
+#[test]
+fn a_process_key_names_a_process_only_with_a_known_start_time() {
+    let a = ProcessKey::new(PUTTY, origin_minus(60));
+    assert!(a.same(&a));
+    assert!(!a.same(&ProcessKey::new(PUTTY, origin_minus(0))));
+    assert!(!a.same(&ProcessKey::new(THIEF, origin_minus(60))));
+    let unknown = ProcessKey::new(PUTTY, None);
+    assert!(!unknown.same(&unknown));
+    assert!(!a.same(&unknown));
+    assert!(!unknown.same(&a));
 }
 
 // infrastructure/peer/chain_test.go
@@ -1501,7 +1634,7 @@ fn a_caller_missing_from_the_snapshot_is_unreadable_and_measured_as_failed() {
     let mut owner = Owner::default();
     owner.pid = 200;
     let c = Caller::measure(owner, Some(Ok(&t)), false);
-    assert!(c.error.is_some() && c.ancestry.is_empty() && !c.unowned());
+    assert!(c.error.is_some() && c.lineage.is_empty() && !c.unowned());
 }
 
 #[test]
@@ -1515,7 +1648,6 @@ fn the_lineage_carries_each_links_start_time_and_stops_at_a_recycled_parent() {
     let mut owner = Owner::default();
     owner.pid = 400;
     let c = Caller::measure(owner, Some(Ok(&t)), false);
-    assert_eq!(c.ancestry, [400, 300]);
     assert_eq!(
         c.lineage,
         [ProcessKey::new(400, at(3)), ProcessKey::new(300, at(2))]
@@ -2163,11 +2295,7 @@ fn a_caller_reads_as_its_owner_then_its_chain_and_why_it_stopped() {
 
 #[test]
 fn the_verdict_classifies_the_caller() {
-    let tree = |a: &[u32]| {
-        let mut c = Caller::new(a[0]);
-        c.ancestry = a.to_vec();
-        c
-    };
+    let tree = |a: &[u32]| walked(a.to_vec());
     assert_eq!(tree(&[APP]).verdict(APP), "in-tree");
     assert_eq!(tree(&[900, APP]).verdict(APP), "in-tree");
     assert_eq!(tree(&[901, 900, APP]).verdict(APP), "in-tree");
@@ -2177,6 +2305,14 @@ fn the_verdict_classifies_the_caller() {
     assert_eq!(failed.verdict(APP), "unmeasured");
     assert_eq!(Caller::new(900).verdict(APP), "unmeasured");
     assert_eq!(tree(&[900, 0]).verdict(0), "out-of-tree");
+}
+
+#[test]
+fn a_failed_measurement_descends_from_nothing_even_with_a_lineage() {
+    let mut failed = walked(vec![900, APP]);
+    failed.error = Some("no such process".to_owned());
+    assert!(!failed.descends_from(APP));
+    assert!(walked(vec![900, APP]).descends_from(APP));
 }
 
 #[test]

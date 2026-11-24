@@ -210,8 +210,7 @@ fn an_attach_is_answered_with_whether_the_token_was_used() {
     let _entered = rt.enter();
     let unused = tokens.issue(issue_payload());
     let used = tokens.issue(issue_payload());
-    let mut caller = justssh_broker::caller::Caller::new(9);
-    caller.ancestry = vec![9];
+    let caller = lineage(&[ProcessKey::new(9, None)]);
     let _open = tokens
         .authorize(used.as_bytes(), b"srv-7@10.0.0.9", &caller)
         .unwrap();
@@ -379,7 +378,6 @@ fn bound_issue(dev: i32) -> Vec<u8> {
 fn lineage(keys: &[ProcessKey]) -> Caller {
     let mut c = Caller::new(keys[0].pid);
     c.lineage = keys.to_vec();
-    c.ancestry = keys.iter().map(|k| k.pid).collect();
     c
 }
 

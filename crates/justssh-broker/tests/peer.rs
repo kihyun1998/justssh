@@ -31,9 +31,8 @@ fn the_owner_of_a_connection_is_the_process_that_opened_it() {
         assert!(c.session.is_some());
         assert_eq!(c.user, peer::own_user(), "{bind}");
         assert!(c.user.as_deref().is_some_and(|s| s.starts_with("S-1-")));
-        assert_eq!(c.ancestry.first(), Some(&std::process::id()));
-        assert_eq!(c.ancestry.get(1).copied(), peer::parent());
-        assert_eq!(c.lineage.len(), c.ancestry.len());
+        assert_eq!(c.lineage.first().map(|k| k.pid), Some(std::process::id()));
+        assert_eq!(c.lineage.get(1).map(|k| k.pid), peer::parent());
         assert!(c.lineage[0].created.is_some());
     }
 }

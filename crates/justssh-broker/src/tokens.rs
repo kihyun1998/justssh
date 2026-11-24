@@ -11,7 +11,7 @@ use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until};
 use zeroize::Zeroizing;
 
-use crate::caller::{Caller, ProcessImage, ProcessKey};
+use crate::caller::{Caller, PinnedBy, ProcessImage, ProcessKey};
 use crate::credential::Credential;
 use crate::issue::Issue;
 use crate::rule::{self, ImageMetadata};
@@ -190,7 +190,7 @@ impl std::fmt::Display for AttachError {
 pub enum Admission {
     /// Nothing had used the token, and this caller claimed it.
     Claim,
-    /// The caller's own pid is pinned.
+    /// The caller itself is pinned, by pid and start time.
     Pin,
     /// One of the caller's ancestors is pinned.
     Descendant,
@@ -230,7 +230,7 @@ struct Entry {
     /// Each connection's signal to close its upstream, by connection.
     ups: Vec<(u64, Arc<Notify>)>,
     shells: u32,
-    pins: Vec<u32>,
+    pins: Vec<ProcessKey>,
     holds: Vec<AbortHandle>,
     /// Pinned processes watched and not yet exited.
     alive: usize,
@@ -713,11 +713,10 @@ impl Tokens {
         if !c.admit.is_zero() && now - first > c.admit {
             return Err(Refusal::AdmissionClosed);
         }
-        if caller.matches(&e.pins) {
-            return Ok(match e.pins.contains(&caller.pid) {
-                true => Admission::Pin,
-                false => Admission::Descendant,
-            });
+        match caller.pinned_by(&e.pins) {
+            Some(PinnedBy::Itself) => return Ok(Admission::Pin),
+            Some(PinnedBy::Ancestor) => return Ok(Admission::Descendant),
+            None => {}
         }
         if now - first <= e.grace {
             self.claim(issued, id, caller);
@@ -731,11 +730,12 @@ impl Tokens {
     fn claim(&self, issued: &mut Issued, id: u64, caller: &Caller) {
         let hold = self.0.config.peer.hold.clone();
         let e = issued.find(id).expect("claimed");
-        for pid in caller.identity(self.0.config.app) {
-            if e.pins.contains(&pid) {
+        for key in caller.identity(self.0.config.app) {
+            if e.pins.iter().any(|p| p.same(&key)) {
                 continue;
             }
-            e.pins.push(pid);
+            e.pins.push(key);
+            let pid = key.pid;
             let held = match hold.as_ref().map(|h| h.hold(pid)) {
                 Some(Ok(held)) => held,
                 Some(Err(why)) => {
@@ -751,7 +751,7 @@ impl Tokens {
                 if held.exited().await
                     && let Some(inner) = tokens.upgrade()
                 {
-                    Tokens(inner).gone(id, pid);
+                    Tokens(inner).gone(id, key);
                 }
             });
             e.holds.push(watch.abort_handle());
@@ -759,13 +759,14 @@ impl Tokens {
         }
     }
 
-    /// Pinned process `pid` of token `id` has exited.
-    fn gone(&self, id: u64, pid: u32) {
+    fn gone(&self, id: u64, key: ProcessKey) {
         let mut issued = self.lock();
         let Some(e) = issued.find(id) else {
             return;
         };
-        e.pins.retain(|&p| p != pid);
+        if let Some(i) = e.pins.iter().position(|p| *p == key) {
+            e.pins.swap_remove(i);
+        }
         e.alive -= 1;
         if e.alive == 0 {
             self.dispose(&mut issued, id, Some("program exited"));

@@ -27,6 +27,15 @@ What a claim pins is `Caller::identity`:
 - inside the tree of the app (this process's parent), the caller and its ancestors below the app;
 - outside it, the caller alone.
 
+A pin is a process, its pid and its start time, and a caller matches it only when both are equal and the start time is known on both sides (`ProcessKey::same`, #95). A pid alone does not tell a process apart: a later process that took a pinned pid was let in as `Pin`, or its child as `Descendant`. That happened when the pinned process could not be watched, so it stayed pinned after it exited, and with a watch when the new process connected between the exit and `Tokens::gone`. The maintainer put such a process (same user, same session, same admitted executable) inside the threat model on #95, since after the grace the pin rules are the only check that tells it apart. So:
+- A start time unknown on either side matches nothing. A caller whose ancestry was not walked is pinned by its pid with no start time: it is watched, but cannot get back in after the grace.
+- `Pin` or `Descendant` is chosen on the caller's own key (`Caller::pinned_by`), so a process that reused a pinned pid under a pinned parent enters as `Descendant`.
+- The "already pinned" check of a claim uses the same comparison, so a process with no start time is watched on each claim. Two such processes cannot be told apart, and skipping the second watch would let the first one's exit dispose of the token while the second is connected.
+- An exit removes the exited process's own key.
+- The terminal binding (`Caller::descends_from_any`) compares holders the same way. Its derived `==` took two unknown start times as equal.
+
+acwbroker-core does the same (acra_client#816), except that its claim skips a key equal to one already pinned, unknown start times included. Go acwbroker still pins bare pids (`entry.go` `pins []uint32`). The pin decision is not observable as upstream payload bytes, so the parity bar is not affected.
+
 ## How long a token lives
 
 A token is disposed of when:
