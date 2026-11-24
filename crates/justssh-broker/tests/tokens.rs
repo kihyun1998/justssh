@@ -398,6 +398,17 @@ async fn the_same_process_again_is_admitted_by_pin() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_failed_measurement_matches_no_pin_even_with_a_lineage() {
+    let mut b = Bench::new();
+    let t = b.issue();
+    b.admit(&t, &in_tree(&[WINSCP]));
+    b.at(Duration::from_secs(30)).await;
+    let mut failed = in_tree(&[WINSCP]);
+    failed.error = Some("no such process".to_owned());
+    assert_eq!(b.refuse(&t, &failed), Refusal::CallerNotPinned);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_helper_under_the_pinned_program_is_admitted_as_descendant() {
     let mut b = Bench::new();
     let t = b.issue();
@@ -848,7 +859,6 @@ fn login_key() -> ProcessKey {
 fn lineage(keys: &[ProcessKey]) -> Caller {
     let mut c = Caller::new(keys[0].pid);
     c.lineage = keys.to_vec();
-    c.ancestry = keys.iter().map(|k| k.pid).collect();
     c
 }
 
@@ -940,7 +950,7 @@ async fn a_bound_token_refuses_an_unmeasured_caller() {
     failed.error = Some("no socket owns that endpoint".to_owned());
     assert_eq!(b.refuse(&t, &failed), Refusal::WrongTerminal);
     let mut no_chain = in_tab();
-    no_chain.ancestry.clear();
+    no_chain.lineage.clear();
     assert_eq!(b.refuse(&t, &no_chain), Refusal::WrongTerminal);
 }
 
@@ -1624,7 +1634,7 @@ fn a_caller_missing_from_the_snapshot_is_unreadable_and_measured_as_failed() {
     let mut owner = Owner::default();
     owner.pid = 200;
     let c = Caller::measure(owner, Some(Ok(&t)), false);
-    assert!(c.error.is_some() && c.ancestry.is_empty() && !c.unowned());
+    assert!(c.error.is_some() && c.lineage.is_empty() && !c.unowned());
 }
 
 #[test]
@@ -1638,7 +1648,6 @@ fn the_lineage_carries_each_links_start_time_and_stops_at_a_recycled_parent() {
     let mut owner = Owner::default();
     owner.pid = 400;
     let c = Caller::measure(owner, Some(Ok(&t)), false);
-    assert_eq!(c.ancestry, [400, 300]);
     assert_eq!(
         c.lineage,
         [ProcessKey::new(400, at(3)), ProcessKey::new(300, at(2))]
@@ -2286,11 +2295,7 @@ fn a_caller_reads_as_its_owner_then_its_chain_and_why_it_stopped() {
 
 #[test]
 fn the_verdict_classifies_the_caller() {
-    let tree = |a: &[u32]| {
-        let mut c = Caller::new(a[0]);
-        c.ancestry = a.to_vec();
-        c
-    };
+    let tree = |a: &[u32]| walked(a.to_vec());
     assert_eq!(tree(&[APP]).verdict(APP), "in-tree");
     assert_eq!(tree(&[900, APP]).verdict(APP), "in-tree");
     assert_eq!(tree(&[901, 900, APP]).verdict(APP), "in-tree");
@@ -2300,6 +2305,14 @@ fn the_verdict_classifies_the_caller() {
     assert_eq!(failed.verdict(APP), "unmeasured");
     assert_eq!(Caller::new(900).verdict(APP), "unmeasured");
     assert_eq!(tree(&[900, 0]).verdict(0), "out-of-tree");
+}
+
+#[test]
+fn a_failed_measurement_descends_from_nothing_even_with_a_lineage() {
+    let mut failed = walked(vec![900, APP]);
+    failed.error = Some("no such process".to_owned());
+    assert!(!failed.descends_from(APP));
+    assert!(walked(vec![900, APP]).descends_from(APP));
 }
 
 #[test]

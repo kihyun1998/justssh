@@ -13,9 +13,8 @@ pub struct Caller {
     pub pid: u32,
     /// The caller's own executable, empty when it could not be read.
     pub image_path: String,
-    /// The caller and its ancestors, nearest first, as far as the walk got.
-    pub ancestry: Vec<u32>,
-    /// `ancestry` with each process's start time.
+    /// The caller and its ancestors, nearest first, as far as the walk got, each with its
+    /// start time.
     pub lineage: Vec<ProcessKey>,
     /// Why the measurement failed, when it did.
     pub error: Option<String>,
@@ -34,6 +33,14 @@ pub struct Caller {
 pub struct ProcessKey {
     pub pid: u32,
     pub created: Option<SystemTime>,
+}
+
+/// Which of a caller's processes a pin named: the caller itself, or one of its ancestors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PinnedBy {
+    Itself,
+    Ancestor,
 }
 
 /// One process in a snapshot of the process list.
@@ -298,7 +305,6 @@ impl Caller {
                     c.error = chain.error;
                     return c;
                 }
-                c.ancestry = chain.links.iter().map(|l| l.pid).collect();
                 c.lineage = chain
                     .links
                     .iter()
@@ -322,7 +328,7 @@ impl Caller {
     }
 
     fn walked(&self) -> bool {
-        self.error.is_none() && !self.ancestry.is_empty()
+        self.error.is_none() && !self.lineage.is_empty()
     }
 
     /// No process owning the connection was found.
@@ -333,16 +339,12 @@ impl Caller {
     /// Whether `root` is the caller or one of its ancestors. An unmeasured caller descends
     /// from nothing.
     pub fn descends_from(&self, root: u32) -> bool {
-        self.error.is_none() && root != 0 && self.ancestry.contains(&root)
+        self.walked() && root != 0 && self.lineage.iter().any(|k| k.pid == root)
     }
 
     /// Whether the caller or one of its ancestors is one of `holders`, by [`ProcessKey::same`].
     pub fn descends_from_any(&self, holders: &[ProcessKey]) -> bool {
-        self.walked()
-            && self
-                .lineage
-                .iter()
-                .any(|k| holders.iter().any(|h| h.same(k)))
+        self.first_in(holders).is_some()
     }
 
     /// The processes a token may be pinned to: inside the tree of `app`, the caller and its
@@ -365,23 +367,21 @@ impl Caller {
             .collect()
     }
 
-    /// Whether the caller is one of `pinned`, or descends from one, by [`ProcessKey::same`].
-    /// An unmeasured caller matches nothing.
-    pub fn matches(&self, pinned: &[ProcessKey]) -> bool {
-        self.walked()
-            && self
-                .lineage
-                .iter()
-                .any(|k| pinned.iter().any(|p| p.same(k)))
+    /// Which of the caller's processes is one of `pinned`, by [`ProcessKey::same`]: the caller
+    /// itself before any ancestor, `None` when none is. An unmeasured caller matches nothing.
+    pub fn pinned_by(&self, pinned: &[ProcessKey]) -> Option<PinnedBy> {
+        Some(match self.first_in(pinned)? {
+            0 => PinnedBy::Itself,
+            _ => PinnedBy::Ancestor,
+        })
     }
 
-    /// Whether the caller itself, not an ancestor, is one of `pinned`, by
-    /// [`ProcessKey::same`].
-    pub fn is_pinned(&self, pinned: &[ProcessKey]) -> bool {
-        self.walked()
-            && self
-                .lineage
-                .first()
-                .is_some_and(|k| pinned.iter().any(|p| p.same(k)))
+    fn first_in(&self, keys: &[ProcessKey]) -> Option<usize> {
+        if !self.walked() {
+            return None;
+        }
+        self.lineage
+            .iter()
+            .position(|k| keys.iter().any(|p| p.same(k)))
     }
 }

@@ -11,7 +11,7 @@ use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until};
 use zeroize::Zeroizing;
 
-use crate::caller::{Caller, ProcessImage, ProcessKey};
+use crate::caller::{Caller, PinnedBy, ProcessImage, ProcessKey};
 use crate::credential::Credential;
 use crate::issue::Issue;
 use crate::rule::{self, ImageMetadata};
@@ -713,11 +713,10 @@ impl Tokens {
         if !c.admit.is_zero() && now - first > c.admit {
             return Err(Refusal::AdmissionClosed);
         }
-        if caller.matches(&e.pins) {
-            return Ok(match caller.is_pinned(&e.pins) {
-                true => Admission::Pin,
-                false => Admission::Descendant,
-            });
+        match caller.pinned_by(&e.pins) {
+            Some(PinnedBy::Itself) => return Ok(Admission::Pin),
+            Some(PinnedBy::Ancestor) => return Ok(Admission::Descendant),
+            None => {}
         }
         if now - first <= e.grace {
             self.claim(issued, id, caller);
