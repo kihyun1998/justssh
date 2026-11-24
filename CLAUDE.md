@@ -16,4 +16,6 @@ Single-context: one `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agen
 
 ## Comments
 
-A comment says what the code is. Why it is this way, what it deliberately leaves out, the trap and the measured value go to the territory note under `docs/map/`. Where none seems to hold it, search the folder and the code symbol first; only then start a new note, named for what the system does there, not for the file. History goes to the commit message. Comments written before this rule still carry the rest: never delete one whose content the map does not yet hold — move it first (`decant`).
+A comment is one of: a license header; behaviour forced by an outside dependency, platform, vendor or protocol we cannot reshape (Rust's `SAFETY:` on `unsafe` is one); a tool directive; a doc comment on a public API; an issue or RFC link for a constraint the code cannot express. Nothing else: a surprise in our own code is fixed, not explained.
+
+A measured value, an outside constraint and the reason behind a design judgement go to the territory note under `docs/map/`. Where none seems to hold it, search the folder and the code symbol first; only then start a new note, named for what the system does there, not for the file. A workaround's reason goes nowhere: the workaround is fixed. History goes to the commit message. Comments written before this rule may still carry what the map keeps: never delete one whose content the map does not yet hold — move it there first.
