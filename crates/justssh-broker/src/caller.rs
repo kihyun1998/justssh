@@ -103,7 +103,8 @@ pub const MAX_DEPTH: usize = 12;
 pub enum Stop {
     NoParent,
     ParentGone,
-    /// The recorded parent started after its child, so the pid was reused.
+    /// The recorded parent started after a link below it whose start time is known, so the pid
+    /// was reused.
     StaleParent,
     Cycle,
     Depth,
@@ -219,7 +220,9 @@ impl Owner {
     }
 }
 
-/// Walks `pid`'s ancestry in `table`, nearest first, up to [`MAX_DEPTH`] processes.
+/// Walks `pid`'s ancestry in `table`, nearest first, up to [`MAX_DEPTH`] processes. A parent
+/// that started after any link below it whose start time is known ends the walk as
+/// [`Stop::StaleParent`] and is left out; a link with no start time is kept.
 pub fn walk(table: &dyn ProcessTable, pid: u32) -> Chain {
     let mut cur = match table.info(pid) {
         Ok(p) => p,
@@ -233,15 +236,16 @@ pub fn walk(table: &dyn ProcessTable, pid: u32) -> Chain {
     };
     let mut links = Vec::new();
     let mut seen = HashSet::new();
+    let mut earliest = cur.created;
     let stop = loop {
         seen.insert(cur.pid);
         let parent_pid = cur.parent;
-        let child = cur.clone();
+        let child_pid = cur.pid;
         links.push(cur);
         if links.len() >= MAX_DEPTH {
             break Stop::Depth;
         }
-        if parent_pid == 0 || parent_pid == child.pid {
+        if parent_pid == 0 || parent_pid == child_pid {
             break Stop::NoParent;
         }
         if seen.contains(&parent_pid) {
@@ -250,11 +254,12 @@ pub fn walk(table: &dyn ProcessTable, pid: u32) -> Chain {
         let Ok(parent) = table.info(parent_pid) else {
             break Stop::ParentGone;
         };
-        if let (Some(p), Some(c)) = (parent.created, child.created)
-            && p > c
+        if let (Some(p), Some(e)) = (parent.created, earliest)
+            && p > e
         {
             break Stop::StaleParent;
         }
+        earliest = parent.created.or(earliest);
         cur = parent;
     };
     Chain {

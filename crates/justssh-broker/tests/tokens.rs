@@ -10,7 +10,8 @@ use std::time::{Duration, SystemTime};
 
 use justssh::Zeroizing;
 use justssh_broker::caller::{
-    Caller, MAX_DEPTH, Owner, ProcessImage, ProcessInfo, ProcessKey, ProcessTable, Stop, walk,
+    Caller, MAX_DEPTH, Owner, PinnedBy, ProcessImage, ProcessInfo, ProcessKey, ProcessTable, Stop,
+    walk,
 };
 use justssh_broker::issue::{self, Issue, Rule};
 use justssh_broker::rule::{ImageMetadata, admits};
@@ -1631,9 +1632,7 @@ fn a_parent_missing_from_the_snapshot_is_reported_as_such() {
 fn a_caller_missing_from_the_snapshot_is_unreadable_and_measured_as_failed() {
     let t = table(&[(100, 0, at(0))]);
     assert_eq!(pids(&t, 200), (vec![], Stop::Unreadable));
-    let mut owner = Owner::default();
-    owner.pid = 200;
-    let c = Caller::measure(owner, Some(Ok(&t)), false);
+    let c = measured(&t, 200);
     assert!(c.error.is_some() && c.lineage.is_empty() && !c.unowned());
 }
 
@@ -1645,12 +1644,56 @@ fn the_lineage_carries_each_links_start_time_and_stops_at_a_recycled_parent() {
         (300, 200, at(2)),
         (400, 300, at(3)),
     ]);
-    let mut owner = Owner::default();
-    owner.pid = 400;
-    let c = Caller::measure(owner, Some(Ok(&t)), false);
+    let c = measured(&t, 400);
     assert_eq!(
         c.lineage,
         [ProcessKey::new(400, at(3)), ProcessKey::new(300, at(2))]
+    );
+}
+
+fn measured(t: &FakeTable, pid: u32) -> Caller {
+    let mut owner = Owner::default();
+    owner.pid = pid;
+    Caller::measure(owner, Some(Ok(t)), false)
+}
+
+#[test]
+fn a_parent_younger_than_a_link_above_the_caller_cuts_the_chain() {
+    let t = table(&[
+        (500, 400, at(9)),
+        (400, 300, at(3)),
+        (300, 1, at(5)),
+        (1, 0, at(0)),
+    ]);
+    assert_eq!(pids(&t, 500), (vec![500, 400], Stop::StaleParent));
+}
+
+#[test]
+fn a_parent_younger_than_a_link_below_an_unknown_start_time_cuts_the_chain() {
+    let t = table(&[
+        (500, 400, at(9)),
+        (400, 300, None),
+        (300, 1, at(10)),
+        (1, 0, at(0)),
+    ]);
+    assert_eq!(pids(&t, 500), (vec![500, 400], Stop::StaleParent));
+    let c = measured(&t, 500);
+    assert_eq!(c.pinned_by(&[ProcessKey::new(300, at(10))]), None);
+}
+
+#[test]
+fn a_real_ancestor_above_an_unknown_start_time_stays_in_the_lineage() {
+    let t = table(&[
+        (500, 400, at(9)),
+        (400, 300, None),
+        (300, 1, at(5)),
+        (1, 0, at(0)),
+    ]);
+    assert_eq!(pids(&t, 500), (vec![500, 400, 300, 1], Stop::NoParent));
+    let c = measured(&t, 500);
+    assert_eq!(
+        c.pinned_by(&[ProcessKey::new(300, at(5))]),
+        Some(PinnedBy::Ancestor)
     );
 }
 
