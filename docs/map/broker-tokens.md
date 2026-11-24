@@ -38,6 +38,16 @@ A pinned process that cannot be watched stays pinned and does not count towards 
 - the early return when another connection remains;
 - stopping the idle timer on a reconnection.
 
+Aborting a timer does not stop one that has already woken. tokio cancels a task only once the poll that is running completes, and a woken timer is blocked on the tokens' std mutex, which is not an await point. So a timer from an earlier close can get the lock after a reconnection and a second close, when `conns == 0` again. The idle timer therefore also checks that it is still the entry's latest (`Entry::idle_generation`), as well as `conns == 0`. Without that check, the old timer disposed of the token at its own deadline, 17–90 µs after the last close instead of the idle time (#96). Go's `disposeIfIdle` and acwbroker's Rust copy (`acwbroker-core`) still have the race (acra_client#817).
+
+The other tasks the tokens abort are not exposed to it, since each re-checks a state that does not come back. The expiry timer checks `first_at.is_none()`. A launch watch's `launch_gone` returns once `first_at` is set, after recording `launched_gone`, which changes nothing once the token is used. A pin watch is aborted only by disposal, after which its entry is gone (read on #96).
+
+`tests/tokens.rs` reaches the race on the real clock. A `Hold` holds the tokens' lock during a grace claim until the idle timer has woken and waits for it:
+- With the reconnection closed at once, the old timer must not dispose early. That needs the reconnection's lock release to win against the waiting timer, so the test repeats it 10 times. Without the generation check it disposed early in 8 to 10 of the 10 runs.
+- With the reconnection kept open, the old timer must leave it alone. That order is fixed, and only the `conns == 0` check holds it.
+
+Removing either check, or never bumping the generation, turned a test red (measured on #96).
+
 Disposal tells each live connection of the token to end its upstream. The relay then sends the upstream `SSH_MSG_DISCONNECT` (`BY_APPLICATION`). Go closes the upstream connection without one. The token and the credential are zeroed as the entry drops.
 
 Go fails the dial of a credential disposed of between the judgement and the dial (`ErrCredentialWiped`). Here the upstream is ended as soon as the relay starts instead: a disposal before it begins leaves a stored notification.
