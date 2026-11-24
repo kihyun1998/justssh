@@ -236,6 +236,7 @@ struct Entry {
     alive: usize,
     expiry: Option<AbortHandle>,
     idle: Option<AbortHandle>,
+    idle_generation: u64,
     /// The path the app wrote the token into, until it is handed to the shredder.
     attached: Option<String>,
     /// The processes the app launched for the token, until its first use.
@@ -366,6 +367,7 @@ impl Tokens {
             alive: 0,
             expiry,
             idle: None,
+            idle_generation: 0,
             attached: None,
             reported: Vec::new(),
             launch: Vec::new(),
@@ -798,9 +800,14 @@ impl Tokens {
         if let Some(t) = e.idle.take() {
             t.abort();
         }
+        e.idle_generation += 1;
+        let generation = e.idle_generation;
         e.idle = Some(self.after(delay, move |t| {
             let mut issued = t.lock();
-            if issued.find(id).is_some_and(|e| e.conns == 0) {
+            if issued
+                .find(id)
+                .is_some_and(|e| e.conns == 0 && e.idle_generation == generation)
+            {
                 t.dispose(&mut issued, id, Some(reason));
             }
         }));

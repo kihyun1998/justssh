@@ -588,6 +588,82 @@ async fn a_reconnection_inside_the_idle_window_keeps_the_credential() {
     b.admit(&t, &in_tree(&[WINSCP]));
 }
 
+#[derive(Default)]
+struct GatedHold {
+    gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    watches: Mutex<Vec<oneshot::Sender<()>>>,
+}
+
+impl Hold for GatedHold {
+    fn hold(&self, pid: u32) -> Result<Held, String> {
+        if pid == SECURECRT
+            && let Some(gate) = self.gate.lock().unwrap().take()
+        {
+            let _ = gate.recv();
+        }
+        let (tx, held) = Held::channel();
+        self.watches.lock().unwrap().push(tx);
+        Ok(held)
+    }
+}
+
+fn reconnect_past_a_woken_idle_timer(idle: Duration, keep: bool) -> (Bench, Option<Grant>) {
+    let (release, gate) = std::sync::mpsc::channel();
+    let hold = Arc::new(GatedHold::default());
+    *hold.gate.lock().unwrap() = Some(gate);
+    let b = Bench::with(|c| {
+        c.idle = idle;
+        c.peer.hold = Some(hold.clone());
+    });
+    let t = b.issue();
+    drop(b.connect(&t, &out_of_tree(PUTTY)));
+    let (tokens, token) = (b.tokens.clone(), t.to_string());
+    let reconnect = std::thread::spawn(move || {
+        let g = tokens
+            .authorize(token.as_bytes(), USER, &out_of_tree(SECURECRT))
+            .expect("a claim inside the grace");
+        assert_eq!(g.admission, Admission::Grace);
+        keep.then_some(g)
+    });
+    std::thread::sleep(2 * idle);
+    release.send(()).unwrap();
+    (b, reconnect.join().unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_timer_that_woke_before_a_reconnection_leaves_the_next_close_its_full_idle() {
+    let idle = Duration::from_millis(300);
+    let mut early = 0;
+    for _ in 0..10 {
+        let (b, _) = reconnect_past_a_woken_idle_timer(idle, false);
+        std::thread::sleep(idle / 4);
+        if b.tokens.is_empty() {
+            early += 1;
+        }
+        std::thread::sleep(idle * 3 / 2);
+        assert_eq!(
+            b.tokens.len(),
+            0,
+            "the last close never disposed of the token"
+        );
+    }
+    assert_eq!(
+        early, 0,
+        "disposed of before the idle time after the last close"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_timer_that_woke_before_a_reconnection_leaves_the_open_connection_alone() {
+    let idle = Duration::from_millis(300);
+    let (b, g) = reconnect_past_a_woken_idle_timer(idle, true);
+    std::thread::sleep(idle / 4);
+    assert_eq!(b.tokens.len(), 1, "disposed of with a connection open");
+    drop(g);
+    std::thread::sleep(idle * 3 / 2);
+    assert_eq!(b.tokens.len(), 0);
+}
+
 #[tokio::test(start_paused = true)]
 async fn disposal_waits_for_every_pinned_process_to_exit() {
     let hold = Arc::new(FakeHold::default());
