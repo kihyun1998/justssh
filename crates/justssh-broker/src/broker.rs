@@ -156,7 +156,10 @@ async fn connection(
                 Err(e) => {
                     logs.log
                         .error(format!("upstream authentication failed: {e}"), &[]);
-                    Verdict::Reject
+                    Verdict::Refuse {
+                        reason: DisconnectReason::BY_APPLICATION,
+                        description: "the target server refused the stored credential or could not be reached".to_owned(),
+                    }
                 }
             }
         }
